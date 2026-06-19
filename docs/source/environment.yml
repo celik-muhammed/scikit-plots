@@ -1,17 +1,211 @@
+# https://github.com/jupyterlite/sphinx-demo
 # https://github.com/jupyterlite/jupyterlite-sphinx/tree/main
-name: xeus-python-kernel
+# https://github.com/jupyterlite/xeus-lite-demo/blob/main/environment.yml
+# https://jupyterlite-xeus.readthedocs.io/en/latest/environment.html
+#
+# ⚠️ https://github.com/jupyterlite/xeus-python-kernel "jupyterlite-xeus-python" is DEPRECATED. Please use "jupyterlite-xeus" https://github.com/jupyterlite/xeus.
+# python - <<'PY'
+# import inspect
+# import jupyterlite_xeus_python.build as b
+# print(inspect.getsource(b.create_env))
+# PY
+#
+# python - <<'PY'
+# import inspect
+# import jupyterlite_xeus_python.build as b
+# print(inspect.getsource(b.build_and_pack_emscripten_env))
+# PY
+#
+## To see exactly what the plugin is injecting, run:
+# python - <<'PY'
+# import inspect
+# import jupyterlite_xeus_python.env_build_addon as e
+# print(inspect.getsource(e.XeusPythonEnv))
+# PY
+#
+# python - <<'PY'
+# import jupyterlite_xeus_python.build as b
+# print("PYTHON_VERSION =", b.PYTHON_VERSION)
+# print("XEUS_PYTHON_VERSION =", b.XEUS_PYTHON_VERSION)
+# PY
+#
+# PYTHON_VERSION = 3.11
+# XEUS_PYTHON_VERSION = 0.15.10
+#
+# pip install -U \
+#   jupyterlite-core \
+#   jupyterlite-xeus \
+#   jupyterlite-sphinx
+#
+## The most useful next diagnostic is:
+# python - <<'PY'
+# import jupyterlite_xeus_python.build as b
+# print("PYTHON_VERSION =", b.PYTHON_VERSION)
+# print("XEUS_PYTHON_VERSION =", b.XEUS_PYTHON_VERSION)
+# print("CHANNELS =", b.CHANNELS)
+# PY
+#
+# import jupyterlite_xeus_python.build as b
+# b.PYTHON_VERSION = "3.12"
+#
+# ✅ "jupyterlite-xeus" is architecturally different from the deprecated "jupyterlite-xeus-python".
+# In the old package: jupyterlite_xeus_python.build.PYTHON_VERSION jupyterlite_xeus_python.build.XEUS_PYTHON_VERSION existed and were hardcoded defaults.
+# jupyterlite_xeus now builds environments from: create_conda_env_from_env_file(...) create_conda_env_from_specs(...)
+#
+# Inspect environment creation
+# python - <<'PY'
+# import inspect
+# import jupyterlite_xeus.create_conda_env as m
+# print(inspect.getsource(m.create_conda_env_from_specs))
+# PY
+#
+# python - <<'PY'
+# import inspect
+# import jupyterlite_xeus.create_conda_env as m
+# print(inspect.getsource(m._create_conda_env_from_specs_impl))
+# PY
+#
+# Inspect addon
+# python - <<'PY'
+# import inspect
+# import jupyterlite_xeus.add_on as m
+# print(inspect.getsource(m))
+# PY
+#
+# Find hardcoded Python versions
+# python - <<'PY'
+# import inspect
+# import pkgutil
+# import importlib
+# import jupyterlite_xeus
+# for m in pkgutil.walk_packages(
+#     jupyterlite_xeus.__path__,
+#     jupyterlite_xeus.__name__ + "."
+# ):
+#     mod = importlib.import_module(m.name)
+#     for name in dir(mod):
+#         try:
+#             value = getattr(mod, name)
+#             if isinstance(value, str):
+#                 if "3.11" in value or "3.12" in value:
+#                     print(m.name, name, value)
+#         except Exception:
+#             pass
+# PY
+#
+# Find where specs are assembled
+# python - <<'PY'
+# import inspect
+# import jupyterlite_xeus.create_conda_env as m
+# src = inspect.getsource(m)
+# for i, line in enumerate(src.splitlines(), 1):
+#     if "spec" in line.lower():
+#         print(f"{i}: {line}")
+# PY
+#
+# jupyter lite build \
+#   --lite-dir /work/docs/source \
+#   --output-dir /tmp/test \
+#   --debug 2>&1 | grep -i xeus
+#
+# jupyter lite build \
+#   --debug \
+#   --contents docs/source/jupyterlite_contents \
+#   --contents docs/source/_contents \
+#   --output-dir docs/build/html/stable/lite \
+#   --apps notebooks \
+#   --apps edit \
+#   --apps lab \
+#   --apps repl \
+#   --apps tree \
+#   --apps consoles \
+#   --lite-dir docs/source \
+#   2>&1 | tee /tmp/jupyterlite.log
+#
+# python -m jupyter lite build \
+#   --debug \
+#   --contents docs/source/jupyterlite_contents \
+#   --contents docs/source/_contents \
+#   --output-dir docs/build/html/stable/lite \
+#   --apps notebooks \
+#   --apps edit \
+#   --apps lab \
+#   --apps repl \
+#   --apps tree \
+#   --apps consoles \
+#   --lite-dir docs/source \
+#   > jupyterlite.log 2>&1 || true
+# cat jupyterlite.log
+#
+# - run:
+#     name: Debug JupyterLite
+#     command: |
+#       python -m jupyter lite build \
+#         --debug \
+#         --contents docs/source/jupyterlite_contents \
+#         --contents docs/source/_contents \
+#         --output-dir docs/build/html/stable/lite \
+#         --apps notebooks \
+#         --apps edit \
+#         --apps lab \
+#         --apps repl \
+#         --apps tree \
+#         --apps consoles \
+#         --lite-dir docs/source \
+#         > jupyterlite.log 2>&1 || true
+#       cat jupyterlite.log
+#
+# echo $?
+---
+
+# https://github.com/jupyterlite/sphinx-demo/blob/main/xeus-kernel-example/docs/source/environment.yml
+# The name of the environment that is set up during the docs build process.
+# This doesn't matter much, as the environment is not used for anything
+# other than the installation of the packages that have been listed here.
+# For examples, visit: https://github.com/jupyterlite/xeus-lite-demo#-how-to-install-kernels-and-packages
+name: jupyterlite-wasm-env
+
 channels:
-  # - defaults
-  - conda-forge
+  # Crucial! This maps out the WebAssembly-compiled package forge mirrors
+  - https://repo.prefix.dev/emscripten-forge-dev
+  - https://prefix.dev/emscripten-forge-4x
+  # - https://repo.prefix.dev/conda-forge
+  # - https://prefix.dev/conda-forge
+  # The emscripten-forge channel is used for wasm32-unknown-emscripten packages, which
+  # are loaded by the xeus-python kernel.
   # - https://repo.mamba.pm/emscripten-forge
+  # The conda-forge channel is used to provide the xeus-python kernel and its dependencies.
+  - conda-forge
+  # - defaults
+  # https://anaconda.org/channels/scikit-plots-wheels-staging-nightly
+  # conda install scikit-plots-wheels-staging-nightly::<PACKAGE>
+  # - scikit-plots-wheels-staging-nightly
+
+# These dependencies are pre-installed in the environment and are loaded when the xeus-python
+# kernel is instantiated when running a JupyterLite site.
+# It is not possible to install these dependencies using pip.
 dependencies:
+  # While we include the Python kernel here, it is also possible to install other kernels
+  # for other languages, such as JavaScript, R, Lua, and so on; see:
+  # https://jupyterlite-xeus.readthedocs.io/en/stable/#xeus-kernels-in-jupyterlite
+  - xeus-python
+  - xeus-cpp
+  - xeus-sqlite
+  # - xeus-javascript
+  # - xeus-lua
+  - xeus-r
+  - r-ggplot2
+  # - r-coursekata
+
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+  - scikit-learn
+  # - scikit-plots-wheels-staging-nightly::scikit-plots
   # Conda packages
-  - python=3.11
-  # - xeus-python
-  - pip
-  - jupyter_server
-  - jupyterlite-core >=0.4.1,<0.5.0
-  # - jupyterlite-xeus>=2.0.0,<3  # environment.yml
+  # - python=3.12  # modern jupyterlite-xeus, the Python version is no longer hidden in package code
+  # - pip
   # pip dependencies from requirements.txt
   # - pip:
       # Use another requirements file.

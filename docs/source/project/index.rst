@@ -9,11 +9,12 @@
   ^ for subsubsections          : ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   " for paragraphs              : """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-.. # https://rsted.info.ucl.ac.be/
-.. # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#paragraph-level-markup
-.. # https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html#footnotes
-.. # attention, caution, danger, error, hint, important, note, tip, warning, admonition, seealso
-.. # versionadded, versionchanged, deprecated, versionremoved, rubric, centered, hlist
+..
+  # https://rsted.info.ucl.ac.be/
+  # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#paragraph-level-markup
+  # https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html#footnotes
+  # attention, caution, danger, error, hint, important, note, tip, warning, admonition, seealso
+  # versionadded, versionchanged, deprecated, versionremoved, rubric, centered, hlist
 
 .. 📰
 
@@ -34,16 +35,14 @@ Project information
 .. toctree::
     :maxdepth: 2
 
-    Community <community.rst>
-    Citing Guide <citing.rst>
     history.rst
-    license.rst
-    mission.rst
-    Teams <teams/index.rst>
-    Code of Conduct <code_of_conduct.rst>
     Governance Process <governance.rst>
+    Teams <teams/index.rst>
+    Citing Guide <citing.rst>
+    license.rst
+    Code of Conduct <code_of_conduct.rst>
+    mission.rst
     Roadmap <roadmap.rst>
+    Community <community.rst>
     Funding <funding.rst>
-    Glossary <glossary/index.rst>
-    Cheatsheet <../cheatsheet/index.rst>
     FAQ <faq.rst>

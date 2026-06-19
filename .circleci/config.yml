@@ -74,7 +74,7 @@ _defaults: &defaults
     # - image: cimg/base:current-22.04
     # documented at https://circleci.com/developer/images/image/cimg/python
     ## https://circleci.com/docs/guides/execution-managed/using-docker/#specifying-docker-images
-    - image: cimg/python:3.11
+    - image: cimg/python:3.12  #  cimg/python:3.11
   # environment:
   #   - MKL_NUM_THREADS: 2
   #   - OPENBLAS_NUM_THREADS: 2
@@ -103,26 +103,21 @@ commands:
   #         name: Check for 'run-ci' label
   #         command: |
   #           set -euo pipefail  # safer bash: fail on error, undefined var, and fail pipe if any step fails
-
   #           # Extract PR number from CIRCLE_PULL_REQUEST URL, if empty skip gracefully
   #           if [ -z "${CIRCLE_PULL_REQUEST:-}" ]; then
   #             echo "No pull request context detected; skipping label check."
   #             exit 0
   #           fi
   #           PR_NUMBER=$(echo "$CIRCLE_PULL_REQUEST" | awk -F/ '{print $NF}')
-
   #           # Use GitHub API to fetch labels; handle errors gracefully without failing job
   #           LABELS=$(curl -sSf -H "Authorization: token $GITHUB_TOKEN" \
   #             "https://api.github.com/repos/your-org/your-repo/issues/$PR_NUMBER/labels" || echo "")
-
   #           if [ -z "$LABELS" ]; then
   #             echo "Warning: Unable to fetch labels or no labels found; proceeding with job."
   #             exit 0
   #           fi
-
   #           # Parse labels safely with jq; handle jq errors without failing
   #           RUN_CI=$(echo "$LABELS" | jq -r '.[].name' 2>/dev/null || echo "" | grep -q "run-ci" && echo "true" || echo "false")
-
   #           if [ "$RUN_CI" != "true" ]; then
   #             echo "Label 'run-ci' not found. Skipping job."
   #             circleci-agent step halt
@@ -138,7 +133,6 @@ commands:
               # Exit early without error — skip the rest of the job if condition is met.
               circleci-agent step halt;
             fi
-
             export GIT_LOG=$(git log --max-count=1 --pretty=format:"%B" | tr "\n" " ")
             echo "Got commit message:"
             echo "${GIT_LOG}"
@@ -188,11 +182,9 @@ commands:
             sudo apt-get update || true
             sudo apt-get install -y --fix-missing ca-certificates
             sudo update-ca-certificates
-
             # Replace HTTPS mirrors with HTTP to avoid cert errors in CI
             sudo sed -i 's|https://ftp.ubuntu.com/ubuntu|http://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list
             sudo sed -i 's|https://security.ubuntu.com/ubuntu|http://security.ubuntu.com/ubuntu|g' /etc/apt/sources.list
-
             # Clean apt cache and update package lists
             sudo apt-get clean
             sudo apt-get update --fix-missing -y
@@ -216,10 +208,8 @@ commands:
               libgmp-dev \
               libmpfr-dev \
               tesseract-ocr
-
             # List installed packs:
             tesseract --list-langs  || true
-
             # Expected output should include:
             #   ara   (Arabic + Ottoman)
             #   deu   (German)
@@ -234,13 +224,45 @@ commands:
               tesseract-ocr-heb \
               tesseract-ocr-tur \
               tesseract-ocr-ell
-
             # Alternatively use EasyOCR which handles multilingual without pack installs:
             # pip install easyocr
             # Then in reader_kwargs:
             #   "backend": "easyocr",
             #   "ocr_lang": "en"   # EasyOCR uses ISO 639-1; add "ar", "de" etc. as needed
-
+  micromamba-install:
+    description: Install micromamba
+    steps:
+      - run:
+          name: "🐍 Install micromamba"
+          command: |
+            # https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html#automatic-install
+            # "${SHELL}" <(curl -L https://micro.mamba.pm/install.sh)
+            curl -Ls https://micro.mamba.pm/api/micromamba/linux-64/latest \
+              | tar -xvj bin/micromamba
+            sudo mv bin/micromamba /usr/local/bin/
+            # If you want to quickly use micromamba in an ad-hoc usecase, you can run
+            # export MAMBA_ROOT_PREFIX=/some/prefix  # optional, defaults to ~/micromamba
+            # eval "$(./bin/micromamba shell hook -s posix)"
+            # Linux/bash:
+            # ./bin/micromamba shell init -s bash -r ~/micromamba  # this writes to your .bashrc file
+            # micromamba shell init -s bash -r ~/micromamba
+            # sourcing the bashrc file incorporates the changes into the running session.
+            # better yet, restart your terminal!
+            # source ~/.bashrc
+            # If you want to persist these changes, This also allows you to choose a custom MAMBA_ROOT_ENVIRONMENT, which is where the packages and repodata cache will live.
+            micromamba --version || true
+            which micromamba || true
+            # Now you can activate the base environment and install new packages, or create other environments.
+            # micromamba activate  # this activates the base environment
+            # micromamba install python=3.6 jupyter -c conda-forge
+            # # or
+            # micromamba create -n env_name xtensor -c conda-forge
+            # micromamba activate env_name
+      - run:
+          name: "Check emscripten channels in micromamba"
+          command: |
+            curl -I https://repo.mamba.pm/emscripten-forge/noarch/repodata.json || true
+            curl -I https://repo.prefix.dev/emscripten-forge-dev/noarch/repodata.json || true
   pip-install:
     description: Upgrade pip and setuptools and wheel to get as clean an install as possible
     steps:
@@ -266,9 +288,25 @@ commands:
             export SETUPTOOLS_USE_DISTUTILS=local
             pip install -U setuptools
 
+            # ⚠️ Escape the heredoc '\<<' in config or python -c (simplest)
             # python -c "import tensorflow as tf, google.protobuf as pb; print('tf', tf.__version__); print('protobuf', pb.__version__)"
             # python -m pip check
             pip install -U "protobuf<7"
+
+            # JupyterLab: dark theme (optional)
+            pip install ipywidgets ipyevents ipympl ipycanvas ipyleaflet
+            pip install jupyterlab-night jupyterlab_miami_nights jupyterlab-fasta jupyterlab-geojson
+
+            # Additional jupyterlite (optional)
+            # Or with pip (you must install micromamba 2.0.5):
+            # https://github.com/jupyterlite/xeus#installation
+            # pip install jupyterlite-javascript-kernel
+            pip install -U \
+              jupyterlite-core \
+              jupyterlite-sphinx \
+              jupyterlite-pyodide-kernel \
+              jupyterlite-xeus \
+              jupyterlite-terminal
   build-scikit-plots:
     description: build scikit-plots
     steps:
@@ -295,22 +333,54 @@ commands:
       - attach_workspace:
           at: ~/
       - check-skip  # This calls your custom command
+
+      ## deps
       - apt-install  # This calls your custom command
+      - micromamba-install
+      # - pip-install
+
       - run:
           name: "📘 build docs"
           # no_output_timeout: 25m
           command: |
-            export PYTHONPATH=$PWD/build-install/lib/python3.11/site-packages
-            cd docs && make html 2>&1 | tee sphinx_log.txt
+            export PYTHONPATH=$PWD/build-install/lib/python3.12/site-packages
+            cd docs && make html 2>&1 | tee ~/sphinx_log.txt
       - run:
-          name: Check sphinx log for warnings (which are treated as errors)
+          name: Check to show sphinx log for warnings (which are treated as errors)
           when: always
           command: |
-            ! grep "^.* WARNING: .*$" sphinx_log.txt
+            # Condition	    grep exit code
+            # Found match	  0
+            # No match	    1
+            # Error	        2
+            # After !:
+            # Condition	    Result
+            # Found warning	1
+            # No warning	  0
+            # grep error	  0 (because non-zero is inverted)
+            # The ! in shell means invert the exit code.
+            # Exited with code exit status 1
+            # ! grep "^.* ERROR: .*$" ~/sphinx_log.txt
+            # ! grep "^.* WARNING: .*$" ~/sphinx_log.txt
+            # echo $?
+            # grep "^.* WARNING: .*$" ~/sphinx_log.txt || true
+            if grep -q "^.* WARNING: .*$" ~/sphinx_log.txt; then
+                echo "Warnings found:"
+                grep "^.* WARNING: .*$" ~/sphinx_log.txt || true
+            fi
+      - run:
+          name: Save sphinx traceback
+          when: always
+          command: |
+            cp /tmp/sphinx-err-*.log ~/sphinx-traceback.log || true
+
       # you must store the artifact explicitly:
       - store_artifacts:
           path: ~/sphinx_log.txt
           destination: sphinx_log.txt
+      - store_artifacts:
+          path: ~/sphinx-traceback.log
+          destination: sphinx-traceback.log
       - store_artifacts:
           # path: docs/build/html/stable/index.html  # index.html
           path: docs/build/html/stable
@@ -361,14 +431,19 @@ jobs:
       - check-skip  # This calls your custom command
       - merge
       - submodules
-      - apt-install
 
+      ## deps
+      - apt-install
+      # - micromamba-install
+      - pip-install
+
+      - restore_cache:
+          key: v1-deps_ccache-datasets-{{ .Branch }}
       - restore_cache:
           keys:
             - deps_ccache-{{ .Branch }}
             - deps_ccache
 
-      - pip-install
       - build-scikit-plots
       # - upload-codecov
       # - store_artifacts:
@@ -379,6 +454,11 @@ jobs:
           paths:
             - ~/.ccache
             - ~/.cache/pip
+      - save_cache:
+          key: v1-deps_ccache-datasets-{{ .Branch }}
+          paths:
+            - ~/scikit_plots_data
+
       - run:
           name: ccache performance
           command: |

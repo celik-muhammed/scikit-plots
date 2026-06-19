@@ -1,3 +1,5 @@
+:html_theme.sidebar_secondary.remove:
+
 .. currentmodule:: scikiplot
 
 ..
@@ -10,11 +12,12 @@
   ^ for subsubsections          : ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   " for paragraphs              : """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-.. # https://rsted.info.ucl.ac.be/
-.. # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#paragraph-level-markup
-.. # https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html#footnotes
-.. # attention, caution, danger, error, hint, important, note, tip, warning, admonition, seealso
-.. # versionadded, versionchanged, deprecated, versionremoved, rubric, centered, hlist
+..
+  # https://rsted.info.ucl.ac.be/
+  # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#paragraph-level-markup
+  # https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html#footnotes
+  # attention, caution, danger, error, hint, important, note, tip, warning, admonition, seealso
+  # versionadded, versionchanged, deprecated, versionremoved, rubric, centered, hlist
 
 .. _glossary-index:
 
@@ -31,7 +34,7 @@ scikit-plots Glossary
 
     .. grid-item-card::
         :padding: 2
-        :columns: 6
+        :columns: 12 12 6 6
 
         **scikit-learn Glossary**
         ^^^
@@ -41,3 +44,16 @@ scikit-plots Glossary
             :caption: glossary
 
             https://scikit-learn.org/stable/glossary.html
+
+    .. grid-item-card::
+        :padding: 2
+        :columns: 12 12 6 6
+
+        **Machine Learning Glossary**
+        ^^^
+        .. toctree::
+            :maxdepth: 2
+            :numbered:
+            :caption: glossary
+
+            https://ml-cheatsheet.readthedocs.io/en/latest/glossary.html

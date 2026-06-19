@@ -52,10 +52,10 @@
 #   conda env create -f environment.yml
 #
 # Create the environment with both base and extended packages:
-#   conda create --name py311 --file environment.yml --group extended
+#   conda create --name py312 --file environment.yml --group extended
 #
 # Add the optional extended packages later to an existing environment:
-#   conda install --name py311 --file environment.yml --group extended
+#   conda install --name py312 --file environment.yml --group extended
 #
 # Note:
 # - Requires conda >= 23.1 (support for optional-dependencies)
@@ -76,17 +76,20 @@
 # variables:
 #   VAR1: valueA
 ---
-name: py311
+name: py312
 
 channels:
   - conda-forge    # ✅ Preferred: community-driven, most packages, up-to-date, great for mamba/micromamba
   # - nvidia             # NVIDIA GPU libraries and drivers
   - defaults       # ☑️ Standard Official Anaconda-maintained packages fallback
   - anaconda       # ⚠️ Optional, if you need Anaconda snapshot of defaults; only include if reproducing Anaconda dist
+  # https://anaconda.org/channels/scikit-plots-wheels-staging-nightly
+  # conda install scikit-plots-wheels-staging-nightly::<PACKAGE>
+  # - scikit-plots-wheels-staging-nightly
 
 dependencies:
   # === Base Dependencies ===
-  - python=3.11
+  - python=3.12
   - ipykernel
 
   # 📘 Jupyter and extensions
@@ -127,6 +130,7 @@ dependencies:
   - matplotlib-base
   - seaborn
   - pillow
+  # - scikit-plots-wheels-staging-nightly::scikit-plots
 
   # 🧠 Machine Learning Models
   - scikit-learn

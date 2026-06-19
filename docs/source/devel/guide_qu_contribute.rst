@@ -1,5 +1,6 @@
-.. https://docs.astropy.org/en/latest/development/quickstart.html
-.. https://github.com/astropy/astropy/blob/main/docs/index_dev.rst
+..
+  # https://docs.astropy.org/en/latest/development/quickstart.html
+  # https://github.com/astropy/astropy/blob/main/docs/index_dev.rst
 
 .. _quickstart_contributing:
 
@@ -112,7 +113,7 @@ Next, `clone <https://git-scm.com/docs/git-clone>`__ your GitHub fork to your ma
 .. tip::
 
     Actually we run below scripts step-by-step in following Documentation.
-    (See Also: `https://github.com/scikit-plots/scikit-plots/blob/main/docker/scripts/bash-first-run-notice.txt`__)
+    (See Also: `bash-first-run-notice.txt <https://github.com/scikit-plots/scikit-plots/blob/main/docker/scripts/bash-first-run-notice.txt>`_)
 
     .. prompt:: bash
 
@@ -480,7 +481,7 @@ code or documentation! At a high level this breaks into a few parts:
 
 .. tip::
 
-    For more information and examples see :ref:`edit-flow` section.
+    For more information and examples see :ref:`edit-flow` or :ref:`edit-flow-work` section.
 
 You can see a summary of the changes you've currently made by running:
 
@@ -545,7 +546,7 @@ In addition, if your commits are not ready for CI testing, you
 should include ``[ci skip]`` the last commit message – but note that code formatting
 checks and documentation building will still be done. Formatting and style errors *should*
 already have been fixed before committing if you have locally
-:ref:`installed pre-commit<contributing_pre_commit>`; but if you have not,
+:ref:`installed pre-commit <contributing_pre_commit>`; but if you have not,
 you can use the :ref:`pre-commit_bot` to fix them automatically in the PR.
 
 Once submitted (and marked as ready), this request goes to the ``scikit-plots`` maintainers and

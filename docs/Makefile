@@ -15,46 +15,13 @@
 
 ## PHONY targets are used to avoid conflicts with files of the same name.
 ## Declare phony targets to indicate these are not files but commands to be executed.
-.PHONY: help clean html dirhtml ziphtml pickle json latex latexpdf changes linkcheck doctest optipng
-
-## (Optional) Ensures that the project is rebuilt from a clean state.
-all: html-noplot
-
-######################################################################
-## Internal variables
-######################################################################
-
-# You can set these variables from the command line.
-SPHINXOPTS    = -T
-SPHINXBUILD  ?= sphinx-build
-PAPER         =
-BUILDDIR      = build
-SOURCEDIR     = source
-
-ifneq ($(EXAMPLES_PATTERN),)
-	EXAMPLES_PATTERN_OPTS := -D sphinx_gallery_conf.filename_pattern="$(EXAMPLES_PATTERN)"
-endif
-
-ifeq ($(CI), true)
-	# On CircleCI using -j2 does not seem to speed up the html-noplot build
-	SPHINX_NUMJOBS_NOPLOT_DEFAULT=1
-else ifeq ($(shell uname), Darwin)
-	# Avoid stalling issues on MacOS
-	SPHINX_NUMJOBS_NOPLOT_DEFAULT=1
-else
-	SPHINX_NUMJOBS_NOPLOT_DEFAULT=auto
-endif
-
-# Internal variables.
-PAPEROPT_a4     = -D latex_paper_size=a4
-PAPEROPT_letter = -D latex_paper_size=letter
-ALLSPHINXOPTS   = -d $(BUILDDIR)/doctrees $(PAPEROPT_$(PAPER)) $(SPHINXOPTS)\
-    $(EXAMPLES_PATTERN_OPTS) $(SOURCEDIR)  # . Use SOURCEDIR variable here
+.PHONY: help Makefile clean html dirhtml ziphtml pickle json latex latexpdf changes linkcheck doctest optipng
 
 ######################################################################
 ## helper
 ######################################################################
 
+# Put it first so that "make" without argument is like "make help".
 help:
 	@echo "Please use \`make <target>' where <target> is one of"
 	@echo "  clean          to remove build artifacts and temporary files"
@@ -71,9 +38,57 @@ help:
 	@echo "  linkcheck      to check all external links for integrity"
 	@echo "  doctest        to run all doctests embedded in the documentation (if enabled)"
 
+## (Optional) Ensures that the project is rebuilt from a clean state.
+all: html-noplot
+
+######################################################################
+## Internal variables
+######################################################################
+
+# You can set these variables from the command line, and also
+# from the environment for the first two.
+# SPHINXOPTS   ?= -T -vvv -W --keep-going -n
+SPHINXOPTS   ?= -T -v
+SPHINXBUILD  ?= sphinx-build
+SOURCEDIR     = source
+BUILDDIR      = build
+PAPER         =
+
+ifeq ($(CI), true)
+	# On CircleCI using -j2 does not seem to speed up the html-noplot build
+	SPHINX_NUMJOBS_NOPLOT_DEFAULT=1
+else ifeq ($(shell uname), Darwin)
+	# Avoid stalling issues on MacOS
+	SPHINX_NUMJOBS_NOPLOT_DEFAULT=1
+else
+	SPHINX_NUMJOBS_NOPLOT_DEFAULT=1
+	# SPHINX_NUMJOBS_NOPLOT_DEFAULT=auto
+endif
+SPHINX_NUMJOBS ?= $(or $(SPHINX_NUMJOBS_NOPLOT_DEFAULT),1)
+
+# Put it first so that "make" without argument is like "make help".
+# help:
+# 	@$(SPHINXBUILD) -M help "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+
+# Catch-all target: route all unknown targets to Sphinx using the new
+# "make mode" option.  $(O) is meant as a shortcut for $(SPHINXOPTS).
+# %: Makefile
+# 	@$(SPHINXBUILD) -M $@ "$(SOURCEDIR)" "$(BUILDDIR)" $(SPHINXOPTS) $(O)
+
 ######################################################################
 ## Cleaning
 ######################################################################
+
+# Define a target to get the absolute path
+get_abs_path:
+	@abs_path=$(realpath ../); \
+	echo "The absolute path of the parent directory is: '$$abs_path'"
+
+# Define a target to add the Git safe directory
+add_safe_dir: get_abs_path
+	@abs_path=$(realpath ../); \
+	echo "Adding '$$abs_path' git safe dir..."; \
+	git config --global --add safe.directory $$abs_path
 
 ## clean target: Removes build artifacts and cleans up the project directory.
 ## Useful for ensuring a fresh build environment.
@@ -107,21 +122,21 @@ clean: clean_basic
 	@echo "Removed $(SOURCEDIR)/_tags/"
 	@rm -rf "$(SOURCEDIR)/_contents/"
 	@echo "Removed $(SOURCEDIR)/_contents/"
-
-# Define a target to get the absolute path
-get_abs_path:
-	@abs_path=$(realpath ../); \
-	echo "The absolute path of the parent directory is: '$$abs_path'"
-
-# Define a target to add the Git safe directory
-add_safe_dir: get_abs_path
-	@abs_path=$(realpath ../); \
-	echo "Adding '$$abs_path' git safe dir..."; \
-	git config --global --add safe.directory $$abs_path
+	@rm -rf "$(SOURCEDIR)/.jupyterlite.doit.db" "$(SOURCEDIR)/.cockle_temp/" "$(SOURCEDIR)/cockle_wasm_env/" "$(SOURCEDIR)/cockle-config.json"
+	@echo "Removed $(SOURCEDIR)/.jupyterlite.doit.db $(SOURCEDIR)/.cockle_temp/ $(SOURCEDIR)/cockle_wasm_env/ $(SOURCEDIR)/cockle-config.json"
 
 ######################################################################
 ## SPHINX
 ######################################################################
+
+ifneq ($(EXAMPLES_PATTERN),)
+	EXAMPLES_PATTERN_OPTS := -D sphinx_gallery_conf.filename_pattern="$(EXAMPLES_PATTERN)"
+endif
+# Internal variables.
+PAPEROPT_a4     = -D latex_paper_size=a4
+PAPEROPT_letter = -D latex_paper_size=letter
+ALLSPHINXOPTS   = -d $(BUILDDIR)/doctrees $(PAPEROPT_$(PAPER)) $(SPHINXOPTS)\
+    $(EXAMPLES_PATTERN_OPTS) $(SOURCEDIR)  # . Use SOURCEDIR variable here
 
 # Default to SPHINX_NUMJOBS=1 for full documentation build. Using
 # SPHINX_NUMJOBS!=1 may actually slow down the build, or cause weird issues in
@@ -137,6 +152,7 @@ html: clean
 	@echo "$(ALLSPHINXOPTS)"
 	@echo "Running sphinx documentation build..."
 	@$(SPHINXBUILD) -b html $(ALLSPHINXOPTS) -j$(SPHINX_NUMJOBS) $(BUILDDIR)/html/stable
+	@echo $? || true
 	@echo "Build finished. The HTML pages are in $(BUILDDIR)/html/stable"
 
 # Default to SPHINX_NUMJOBS=auto (except on MacOS and CI) since this makes
@@ -227,3 +243,19 @@ dist: html ziphtml
 
 serve:
 	cd ./build/html/stable && python -m http.server 8000
+
+# find . -name .jupyterlite.doit.db
+xeus:
+	jupyter lite build \
+		--debug \
+		--contents source/jupyterlite_contents \
+		--contents source/_contents \
+		--output-dir build/html/stable/lite \
+		--apps notebooks \
+		--apps edit \
+		--apps lab \
+		--apps repl \
+		--apps tree \
+		--apps consoles \
+		--lite-dir source \
+		2>&1 | tee /tmp/jupyterlite.log

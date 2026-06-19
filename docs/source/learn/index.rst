@@ -1,5 +1,10 @@
-.. https://devguide.python.org/documentation/markup/#substitutions
+:html_theme.sidebar_secondary.remove:
+
+..
+  # https://devguide.python.org/documentation/markup/#substitutions
+
 .. Welcome to Scikit-plots 101 |br| |release| - |today|
+
 ..
     substitutions don’t work in .. raw:: html
     .. raw:: html
@@ -7,13 +12,16 @@
     <div style="text-align: center"><strong>
     Welcome to Scikit-plots 101<br>|full_version| - |today|
     </strong></div>
+
 ..
-    https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#directive-centered
+    # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#directive-centered
     .. centered:: Welcome to Scikit-plots 101 :raw-html:`<br />` |full_version| - |today|
     .. centered::
         **Scikit-plots Documentation** :raw-html:`<br />` |full_version| - |today|
 
-.. https://docutils.sourceforge.io/docs/ref/rst/directives.html#custom-interpreted-text-roles
+..
+  # https://docutils.sourceforge.io/docs/ref/rst/directives.html#custom-interpreted-text-roles
+
 .. role:: raw-html(raw)
    :format: html
 
@@ -21,9 +29,9 @@
 
    <br/>
 
-.. _learning-resources:
+.. _scikit-plots-learn:
 
-:raw-html:`<div style="text-align: center"><strong>` 🎓 Learning Resources
+:raw-html:`<div style="text-align: center"><strong>` 🤗 Scikit-plots Learn
 |br| |full_version| - |today|
 :raw-html:`</strong></div>`
 
@@ -37,17 +45,18 @@
   ^ for subsubsections          : ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   " for paragraphs              : """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
-.. # https://rsted.info.ucl.ac.be/
-.. # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#paragraph-level-markup
-.. # https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html#footnotes
-.. # https://documatt.com/restructuredtext-reference/element/admonition.html
-.. # attention, caution, danger, error, hint, important, note, tip, warning, admonition, seealso
-.. # versionadded, versionchanged, deprecated, versionremoved, rubric, centered, hlist
+..
+  # https://rsted.info.ucl.ac.be/
+  # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#paragraph-level-markup
+  # https://www.sphinx-doc.org/en/master/usage/restructuredtext/basics.html#footnotes
+  # https://documatt.com/restructuredtext-reference/element/admonition.html
+  # attention, caution, danger, error, hint, important, note, tip, warning, admonition, seealso
+  # versionadded, versionchanged, deprecated, versionremoved, rubric, centered, hlist
 
-.. _resources-index:
+.. _learn-index:
 
 ======================================================================
-Resources
+Learn
 ======================================================================
 
 .. grid:: 1 1 1 1
@@ -55,29 +64,29 @@ Resources
     .. grid-item-card::
         :padding: 3
 
-        **data**
+        **cheatsheet**
         ^^^
         .. toctree::
-            :maxdepth: 3
+            :maxdepth: 2
 
-            Data Resources <./data_resources.rst>
+            Cheatsheet <./cheatsheet/index.rst>
 
     .. grid-item-card::
         :padding: 3
 
-        **external**
+        **resources**
         ^^^
         .. toctree::
             :maxdepth: 3
 
-            External Resources <./external_resources.rst>
+            Resources <resources/index.rst>
 
     .. grid-item-card::
         :padding: 3
 
-        **youtu.be**
+        **glossary**
         ^^^
         .. toctree::
             :maxdepth: 3
 
-            Youtube <./youtube.rst>
+            Glossary <glossary/index.rst>

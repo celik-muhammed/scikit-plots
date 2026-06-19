@@ -74,6 +74,8 @@ except ImportError:
     # that need plotly.
     pass
 
+from sklearn.experimental import enable_iterative_imputer  # noqa: F401
+
 import jinja2
 from sphinx.application import Sphinx
 # from sphinx.locale import _
@@ -282,6 +284,9 @@ extensions = [
     "sphinxcontrib.sass",  # Support for SASS stylesheets in Sphinx documentation.
     "sphinxcontrib.inkscapeconverter",  # Convert SVGs created by Inkscape.
     #
+    "sphinx_tags",  # Needs to be loaded *after* autodoc.
+    # "sphinx_remove_toctrees",       # Remove certain TOC trees from specific documentation pages.
+    #
     # Custom extensions (these should be placed last to avoid conflicts)
     # See _sphinx_ext/
     #
@@ -296,23 +301,23 @@ extensions = [
     "_sphinx_ext.sklearn_ext.override_pst_pagetoc",  # Custom extension for overriding page TOC in certain cases.
     "_sphinx_ext.sklearn_ext.sphinx_issues",  # Custom extension for managing and displaying issues.
     "_sphinx_ext.sklearn_ext.move_gallery_links",  # Custom extension for rearranging gallery links.
-    # local skplt or scikitplot lib: Custom extensions
-    "_sphinx_ext.skplt_ext.version_info_extension",  # version_info_extension
-    "sphinx_tags",  # Needs to be loaded *after* autodoc.
-    # "sphinx_remove_toctrees",       # Remove certain TOC trees from specific documentation pages.
     "_sphinx_ext.sklearn_ext.search_filter",  # Custom extension
     "_sphinx_ext.sklearn_ext.add_js_css_files",  # Custom extension
-    "scikitplot._externals._sphinx_ext._sphinx_gallery_jupyterlite",
+    # local skplt or scikitplot lib: Custom extensions
+    "_sphinx_ext.skplt_ext.version_info_extension",  # version_info_extension
     # "_sphinx_ext.skplt_ext.url_extension",  # URL, REPLite extension
     "scikitplot._externals._sphinx_ext._sphinx_jinja_render",  # "_sphinx_ext.skplt_ext.url_extension",  # URL, REPLite extension
-    "scikitplot._externals._sphinx_ext._sphinx_ai_assistant",
+    # https://pydata-sphinx-theme.readthedocs.io/en/stable/community/topics/galleries.html
+    # https://github.com/pydata/pydata-sphinx-theme/blob/main/docs/conf.py
+    "scikitplot._externals._sphinx_ext._pydata_sphinx_theme.gallery_directive",  # "_extension.gallery_directive",
+    "scikitplot._externals._sphinx_ext._pydata_sphinx_theme.component_directive",  # "_extension.component_directive",
     # "sphinxcontrib.youtube",
     "scikitplot._externals._sphinx_ext._sphinxcontrib_youtube",
+    "scikitplot._externals._sphinx_ext._sphinx_gallery_jupyterlite",
+    "scikitplot._externals._sphinx_ext._sphinx_ai_assistant",
+    #
     # https://isolveit.github.io/sphinx-pdf-generate
     # "sphinx_pdf_generate",
-    # custom extensions
-    # "_extension.gallery_directive",
-    # "_extension.component_directive",
 ]
 
 # %%
@@ -404,6 +409,7 @@ try:
     # jupyterlite_sphinx = run notebooks/code in the user’s browser at documentation viewing time
     # If you want live, browser-based execution with no server, use jupyterlite_sphinx
     # (No backend needed User browser Pyodide / WebAssembly).
+    # https://sphinx-book-theme.readthedocs.io/en/stable/content/launch.html#jupyterlite
     extensions.append("jupyterlite_sphinx")
     with_jupyterlite = True
 except ImportError:
@@ -415,20 +421,74 @@ except ImportError:
     )
     with_jupyterlite = False
 
-# Build in the current directory
-# jupyterlite_dir = "/path/to/your/lite/dir"
-# # Build-time configuration for JupyterLite
-# jupyterlite_config = "jupyter_lite_config.json"
-# # Override plugins and extension settings
-# jupyterlite_overrides = "overrides.json"
+# -- Options for jupyterlite-sphinx ------------------------------------------
+
+# A list of glob patterns relative to the source directory that match file
+#  and directories to include as a part of the embedded JupyterLite site.
+# jupyterlite_contents = ["custom_contents/*"]
+
+# JupyterLite directory
+# https://jupyterlite-sphinx.readthedocs.io/en/latest/configuration.html#jupyterlite-dir
+# jupyterlite_dir = "."  # "/path/to/your/lite/dir"
+
+# JupyterLite configuration
+# https://jupyterlite-sphinx.readthedocs.io/en/latest/configuration.html#jupyterlite-configuration
+# https://jupyterlite.readthedocs.io/en/stable/howto/configure/config_files.html
+# JupyterLite can be configured via a set of well-known files:
+#     jupyter_lite_config.json - for build time configuration, typically when running jupyter lite build
+#     jupyter-lite.json - for runtime configuration, typically when loading the page
+#     overrides.json - for overriding the plugins and extension settings at runtime when opening JupyterLite in a browser
+#
+# docs/source/conf.py: the Sphinx configuration file. This is where you configure jupyterlite-sphinx and other Sphinx extensions.
+# docs/source/index.rst: the main page of the Sphinx documentation website, to add content to your Sphinx site.
+# docs/source/jupyter_lite_config.json: a JupyterLite configuration file that allows configuring JupyterLite at build time. https://jupyterlite.readthedocs.io/en/stable/howto/configure/config_files.html#jupyter-lite-config-json
+# docs/source/jupyter-lite.json: a JupyterLite configuration file for runtime configuration https://jupyterlite.readthedocs.io/en/stable/howto/configure/config_files.html#jupyter-lite-json
+# docs/source/overrides.json: a JupyterLite configuration file to configure plugins and other extensions for JupyterLite.
+# docs/source/try_examples.json: a JupyterLite configuration file to configure the TryExamples directive and buttons; see https://jupyterlite-sphinx.readthedocs.io/en/stable/directives/try_examples.html#try-examples-json-configuration-file
+# docs/source/environment.yml: the environment file that is used install the in-browser dependencies for the kernel at the time of building the JupyterLite deployment within the Sphinx build process.
+#
+# https://github.com/jupyterlite/jupyterlite/blob/main/examples/jupyter_lite_config.json
+# https://github.com/jupyterlite/jupyterlite/blob/main/examples/jupyter-lite.json
+# https://github.com/jupyterlite/jupyterlite/blob/main/examples/repl/jupyter-lite.json
+# https://github.com/jupyterlite/xeus/blob/main/docs/jupyter_lite_config.json
+# jupyterlite_config = "jupyter_lite_config.json"  # Path to the JupyterLite config file (typically jupyter_lite_config.json)
+# https://github.com/jupyterlite/jupyterlite/blob/main/examples/overrides.json
+# https://github.com/jupyterlite/jupyterlite-sphinx/blob/main/docs/sample_overrides.json
+# jupyterlite_overrides = "overrides.json"         # Path to an overrides.json file for federated extensions, settings overrides, etc.
+#
+# https://www.npmjs.com/package/pyodide?activeTab=versions
+# https://pyodide.org/en/stable/development/abi.html#platform-versions
+# https://pyodide.org/en/stable/usage/index.html#web-browsers
+# Keep Kernel Sync with "docs/source/jupyter-lite.json":
+# "https://cdn.jsdelivr.net/pyodide/v314.0.0/full/pyodide.js"
+# "https://cdn.jsdelivr.net/pyodide/v0.29.4/full/pyodide.js"
+# "https://cdn.jsdelivr.net/pyodide/v0.28.3/full/pyodide.js"
+# "https://cdn.jsdelivr.net/pyodide/v0.27.7/full/pyodide.js"
+# "https://cdn.jsdelivr.net/pyodide/v0.26.4/full/pyodide.js"
+#
+# PYODIDE_VERSION = os.getenv("PYODIDE_VERSION", "314.0.0")
+# Override values inside jupyter-config-data without editing JSON files
+# jupyterlite_config_data_overrides = {
+#     "litePluginSettings": {
+#         "@jupyterlite/pyodide-kernel-extension:kernel": {
+#             "pyodideUrl": (
+#                 f"https://cdn.jsdelivr.net/pyodide/v{PYODIDE_VERSION}/full/pyodide.js"
+#             )
+#         }
+#     }
+# }
+
+# Setting default button texts for the JupyterLite, NotebookLite, Replite, and Voici directives
+# https://jupyterlite-sphinx.readthedocs.io/en/latest/configuration.html#setting-default-button-texts-for-the-jupyterlite-notebooklite-replite-and-voici-directives
+#
 # jupyterlite_new_tab_button_text = "My custom JupyterLite button text"
 # notebooklite_new_tab_button_text = "My custom NotebookLite button text"
 # replite_new_tab_button_text = "My custom Replite button text"
 # voici_new_tab_button_text = "My custom Voici button text"
+
 # -----------------------------------------------------------------------------
 # Interactive documentation examples via JupyterLite
 # -----------------------------------------------------------------------------
-
 # https://jupyterlite-sphinx.readthedocs.io/en/latest/directives/try_examples.html#global-configuration
 global_enable_try_examples = True
 try_examples_global_button_text = "Try it in your browser!"
@@ -879,6 +939,7 @@ templates_path = [
 
 # https://github.com/pydata/pydata-sphinx-theme/blob/main/docs/conf.py
 # https://pydata-sphinx-theme.readthedocs.io/en/stable/examples/gallery.html#other-projects-using-this-theme
+# https://github.com/executablebooks/sphinx-book-theme
 # html_theme = "furo"
 html_theme = "pydata_sphinx_theme"  # scikit-learn like
 
@@ -1872,6 +1933,7 @@ sass_targets = {
 # ---------------------------------------------------------------------------
 # Merge into existing html_context if you already have one
 html_context = {
+    # "github_url": "https://github.com",
     "github_user": "scikit-plots",
     "github_repo": "scikit-plots",
     "github_version": gh_branch,  # branch the docs are built from
