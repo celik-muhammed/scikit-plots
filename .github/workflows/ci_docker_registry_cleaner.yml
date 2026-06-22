@@ -14,7 +14,15 @@
 #   2. Manual   (workflow_dispatch): full parameter control via GitHub UI or CLI.
 #
 # REGISTRY SUPPORT
-#   docker_hub    fully implemented  — Docker Hub v2 REST API (JWT auth)
+#   docker_hub    fully implemented FOR NAMED TAGS ONLY — Docker Hub v2 REST
+#                 API (JWT auth).  KNOWN PLATFORM LIMITATION (not a bug here):
+#                 Docker Hub exposes no public API to list or delete
+#                 untagged/orphaned manifest digests — the "sha256:…" rows
+#                 with no Tags value shown in the Hub web UI.  GET .../tags
+#                 returns named tags only, and DELETE on the OCI distribution
+#                 endpoint (.../manifests/<digest>) is rejected by Docker Hub
+#                 with "UNSUPPORTED".  See PURGE MODE note below — this is
+#                 the one place docker_hub does NOT have parity with GHCR/Quay.
 #   github_ghcr   fully implemented  — GitHub Packages API 2022-11-28 (GITHUB_TOKEN)
 #   redhat_quay   fully implemented  — Quay.io REST API v1 (Bearer QUAY_ROBOT_TOKEN)
 #
