@@ -164,7 +164,8 @@ on:
       cleanup_policies:
         description: >-
           Per-tag-pattern retention policies (JSON array, conda-channel style).
-          Each entry: { "pattern": "<POSIX ERE>", "keep_days": <int>, "label": "<str>" }.
+          Each entry:
+          ```{ "pattern": "<POSIX ERE>", "keep_days": <int>, "label": "<str>" }```.
           First matching policy wins (priority = array order).
           keep_days: -1  → keep forever (never a deletion candidate).
           keep_days: 0   → keep tags pushed today only (same as global default).
@@ -176,6 +177,7 @@ on:
           Leave empty to use the global cleanup_keep_days for every tag (default
           behaviour — fully backward compatible).
           Example (scikit-plots wheel matrix):
+          ```
             [
               {"pattern":"^Wheel-3\\.9-",  "keep_days":7,  "label":"py39 wheels"},
               {"pattern":"^Wheel-3\\.10-", "keep_days":14, "label":"py310 wheels"},
@@ -183,6 +185,7 @@ on:
               {"pattern":"^v[0-9]",        "keep_days":90, "label":"release tags"},
               {"pattern":"^latest$",       "keep_days":-1, "label":"latest pointer"}
             ]
+          ```
         required: false
         type: string
         default: ''
