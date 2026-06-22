@@ -161,6 +161,31 @@ on:
         required: false
         type: string
         default: ''
+      cleanup_policies:
+        description: >-
+          Per-tag-pattern retention policies (JSON array, conda-channel style).
+          Each entry: { "pattern": "<POSIX ERE>", "keep_days": <int>, "label": "<str>" }.
+          First matching policy wins (priority = array order).
+          keep_days: -1  → keep forever (never a deletion candidate).
+          keep_days: 0   → keep tags pushed today only (same as global default).
+          Tags matching no policy fall back to cleanup_keep_days.
+          GHCR multi-tag manifests use the most conservative (longest) keep_days
+          across all tags on a shared digest so no co-digest tag is accidentally
+          removed while another is supposed to be kept.
+          Ignored completely when cleanup_purge is true (purge bypasses all policies).
+          Leave empty to use the global cleanup_keep_days for every tag (default
+          behaviour — fully backward compatible).
+          Example (scikit-plots wheel matrix):
+            [
+              {"pattern":"^Wheel-3\\.9-",  "keep_days":7,  "label":"py39 wheels"},
+              {"pattern":"^Wheel-3\\.10-", "keep_days":14, "label":"py310 wheels"},
+              {"pattern":"^Wheel-3\\.11-", "keep_days":30, "label":"py311 wheels"},
+              {"pattern":"^v[0-9]",        "keep_days":90, "label":"release tags"},
+              {"pattern":"^latest$",       "keep_days":-1, "label":"latest pointer"}
+            ]
+        required: false
+        type: string
+        default: ''
       cleanup_dry_run:
         description: >-
           Dry run: enumerate candidates and print actions without executing them.
@@ -262,6 +287,9 @@ jobs:
       KEEP_DAYS:        ${{ inputs.cleanup_keep_days         || '0'    }}
       IGNORE_PATTERNS:  ${{ inputs.cleanup_ignore_patterns   || '^latest$,^latest-,^main$,^maintenance-,^v[0-9]' }}
       EXPLICIT_TAGS:    ${{ inputs.cleanup_explicit_tags     || ''     }}
+      # Per-tag-pattern retention policies (conda-channel style, JSON array).
+      # Empty string → all tags use the global KEEP_DAYS (fully backward compatible).
+      CLEANUP_POLICIES: ${{ inputs.cleanup_policies           || ''     }}
       # Patterns that survive even a purge (empty input → total wipe).
       PURGE_KEEP_PATTERNS: ${{ inputs.cleanup_purge_keep_patterns || '^latest$' }}
       # NOTE: DRY_RUN and PURGE are intentionally NOT defined here.  They are
@@ -412,16 +440,80 @@ jobs:
             exit 1
           fi
 
-          # ── Compute cutoff epoch ─────────────────────────────────────────────
-          # Cutoff = midnight UTC of (today − KEEP_DAYS days).
-          # Tags pushed on or after this point are unconditionally kept.
-          # Using midnight avoids race conditions with tags pushed moments ago.
+          # ── Compute global cutoff epoch (fallback for tags matching no policy) ─
+          # Mirrors the GHCR/Quay steps exactly so behaviour is identical when
+          # cleanup_policies is empty (fully backward compatible).
           TODAY_MIDNIGHT=$(date -u +%Y-%m-%dT00:00:00Z)
           CUTOFF_EPOCH=$(date -u -d "${TODAY_MIDNIGHT} - ${KEEP_DAYS} days" +%s)
           CUTOFF_DATE=$(date -u -d "@${CUTOFF_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)
-          echo "    Cutoff     : ${CUTOFF_DATE} (epoch ${CUTOFF_EPOCH})"
+          echo "    Cutoff     : ${CUTOFF_DATE} (epoch ${CUTOFF_EPOCH}) [global default]"
 
-          # ── Authenticate: exchange credentials for Docker Hub JWT ────────────
+          # ── Validate CLEANUP_POLICIES JSON (if provided) ─────────────────────
+          # Must be a JSON array; malformed JSON is a hard error (fail fast so the
+          # operator discovers the typo before any destructive action is taken).
+          # Each element is validated explicitly — no silent coercion of bad
+          # shapes — per the "validate all inputs and assumptions" rule.
+          POLICY_COUNT=0
+          if [[ -n "${CLEANUP_POLICIES:-}" ]]; then
+            if ! printf '%s' "${CLEANUP_POLICIES}" | jq -e 'type == "array"' > /dev/null 2>&1; then
+              echo "❌ cleanup_policies must be a valid JSON array." >&2
+              echo "   Got: '${CLEANUP_POLICIES:0:120}'" >&2
+              exit 1
+            fi
+            # Structural validation of every element: 'pattern' must be a
+            # non-empty string, 'keep_days' must be an integer >= -1.
+            # 'label' is optional/free-form and not validated beyond type.
+            if ! printf '%s' "${CLEANUP_POLICIES}" | jq -e '
+                  all(.[]?;
+                    (.pattern | type == "string" and length > 0) and
+                    (.keep_days | type == "number" and (. == floor) and . >= -1)
+                  )' > /dev/null 2>&1; then
+              echo "❌ cleanup_policies has a malformed entry." >&2
+              echo "   Each entry needs: {\"pattern\":\"<non-empty POSIX ERE>\",\"keep_days\":<int >= -1>}" >&2
+              echo "   Got: '${CLEANUP_POLICIES:0:200}'" >&2
+              exit 1
+            fi
+            POLICY_COUNT=$(printf '%s' "${CLEANUP_POLICIES}" | jq 'length')
+            echo "    Policies   : ${POLICY_COUNT} per-tag retention policy/ies active"
+          else
+            echo "    Policies   : none (all tags use global keep_days=${KEEP_DAYS}d)"
+          fi
+
+          # ── Helper: resolve the effective keep_days for one tag name ────────
+          # First matching policy wins (array order = priority).  No match →
+          # fall back to the global KEEP_DAYS.  Pure function: reads only its
+          # argument and the read-only CLEANUP_POLICIES/KEEP_DAYS env vars.
+          get_policy_keep_days() {
+            local tag="$1"
+            [[ "${POLICY_COUNT}" -eq 0 ]] && { echo "${KEEP_DAYS}"; return 0; }
+            local result
+            result=$(printf '%s' "${CLEANUP_POLICIES}" | jq -r --arg tag "${tag}" '
+              [ .[] | select(($tag | test(.pattern))) ] | .[0].keep_days // empty
+            ')
+            if [[ -z "${result}" ]]; then
+              echo "${KEEP_DAYS}"
+            else
+              echo "${result}"
+            fi
+          }
+
+          # ── Helper: convert a resolved keep_days value into a cutoff epoch ───
+          # keep_days == -1 is the "keep forever" sentinel — represented as an
+          # empty string so callers branch explicitly rather than relying on a
+          # magic numeric cutoff that could accidentally compare true.
+          policy_cutoff_epoch() {
+            local kd="$1"
+            if [[ "${kd}" == "-1" ]]; then
+              echo ""   # forever — caller must treat empty as "never delete"
+              return 0
+            fi
+            if [[ "${kd}" == "${KEEP_DAYS}" ]]; then
+              echo "${CUTOFF_EPOCH}"   # reuse precomputed global cutoff
+              return 0
+            fi
+            date -u -d "${TODAY_MIDNIGHT} - ${kd} days" +%s
+          }
+
           # Docker Hub v2 returns a short-lived Bearer JWT.
           # We use -f so curl exits non-zero on HTTP 4xx/5xx (covered by set -e).
           DH_JWT=$(curl -fsSL \
@@ -582,14 +674,28 @@ jobs:
                 KEPT=$(( KEPT + 1 ))
                 continue
               fi
-              if (( TAG_EPOCH >= CUTOFF_EPOCH )); then
-                echo "  ✅ KEEP    ${TAG_NAME}  (pushed ${TAG_PUSHED})"
+              # ── Per-policy cutoff resolution ────────────────────────────────
+              # First matching policy in CLEANUP_POLICIES wins; no match falls
+              # back to the global KEEP_DAYS/CUTOFF_EPOCH computed above.
+              TAG_KEEP_DAYS=$(get_policy_keep_days "${TAG_NAME}")
+              TAG_CUTOFF_EPOCH=$(policy_cutoff_epoch "${TAG_KEEP_DAYS}")
+
+              # keep_days == -1 → empty cutoff → never a deletion candidate.
+              if [[ -z "${TAG_CUTOFF_EPOCH}" ]]; then
+                echo "  ✅ KEEP    ${TAG_NAME}  (policy keep_days=-1 — kept forever)"
+                KEPT=$(( KEPT + 1 ))
+                continue
+              fi
+
+              if (( TAG_EPOCH >= TAG_CUTOFF_EPOCH )); then
+                echo "  ✅ KEEP    ${TAG_NAME}  (pushed ${TAG_PUSHED}, keep_days=${TAG_KEEP_DAYS})"
                 KEPT=$(( KEPT + 1 ))
                 continue
               fi
 
               # ── Deletion candidate ─────────────────────────────────────────
-              echo "  🗑️  DELETE  ${TAG_NAME}  (pushed ${TAG_PUSHED}, before cutoff ${CUTOFF_DATE})"
+              TAG_CUTOFF_DATE=$(date -u -d "@${TAG_CUTOFF_EPOCH}" +%Y-%m-%dT%H:%M:%SZ)
+              echo "  🗑️  DELETE  ${TAG_NAME}  (pushed ${TAG_PUSHED}, keep_days=${TAG_KEEP_DAYS}, before cutoff ${TAG_CUTOFF_DATE})"
               dockerhub_delete_tag "${TAG_NAME}"
             done < <(echo "${RESPONSE}" | jq -c '.results[]')
           done
