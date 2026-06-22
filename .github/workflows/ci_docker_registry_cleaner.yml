@@ -14,15 +14,21 @@
 #   2. Manual   (workflow_dispatch): full parameter control via GitHub UI or CLI.
 #
 # REGISTRY SUPPORT
-#   docker_hub    fully implemented FOR NAMED TAGS ONLY — Docker Hub v2 REST
-#                 API (JWT auth).  KNOWN PLATFORM LIMITATION (not a bug here):
-#                 Docker Hub exposes no public API to list or delete
-#                 untagged/orphaned manifest digests — the "sha256:…" rows
-#                 with no Tags value shown in the Hub web UI.  GET .../tags
-#                 returns named tags only, and DELETE on the OCI distribution
-#                 endpoint (.../manifests/<digest>) is rejected by Docker Hub
-#                 with "UNSUPPORTED".  See PURGE MODE note below — this is
-#                 the one place docker_hub does NOT have parity with GHCR/Quay.
+#   docker_hub    fully implemented — Docker Hub v2 REST API (JWT auth).
+#                 Two-phase cleanup: Phase 1 removes named tags via the Hub
+#                 tag endpoint; Phase 2 deletes the underlying manifests by
+#                 digest via the Hub REST endpoint:
+#                   DELETE hub.docker.com/.../manifests/{digest}
+#                 This is the Hub API (hub.docker.com), NOT the OCI
+#                 distribution API (registry-1.docker.io) which does reject
+#                 DELETE by digest with "UNSUPPORTED" for Docker Hub.
+#                 Digests are collected from the /tags response during Phase 1
+#                 enumeration; any parent (Image Index) or child (platform
+#                 image) manifest whose ALL pointing tags were reclaimed is
+#                 deleted in Phase 2.  Now has full parity with GHCR/Quay.
+#                 Scope: manifests discovered this run only — pre-existing
+#                 untagged digests (orphaned before this run) are not visible
+#                 from /tags and are outside Phase 2's reach.
 #   github_ghcr   fully implemented  — GitHub Packages API 2022-11-28 (GITHUB_TOKEN)
 #   redhat_quay   fully implemented  — Quay.io REST API v1 (Bearer QUAY_ROBOT_TOKEN)
 #
@@ -49,11 +55,13 @@
 #   cleanup_ignore_patterns check are bypassed — every tag/version becomes a
 #   deletion candidate.  The ONLY survivors are tags matching
 #   cleanup_purge_keep_patterns (default: '^latest$'); set that input empty
-#   for a total wipe.  Purge is the right tool for the GHCR/Quay "stale
-#   manifest" problem where re-pushing a tag orphans the previous digest:
-#   untagged manifests carry no tags, so they never match a keep-pattern and
-#   are always reclaimed under purge.  Purge still honours dry-run mode and
-#   remains idempotent (HTTP 400/404 → already gone → not an error).
+#   for a total wipe.  Purge is the right tool for the "stale manifest"
+#   problem where re-pushing a tag orphans the previous digest.  For GHCR and
+#   Quay, untagged manifests carry no tags and are always reclaimed.  For
+#   Docker Hub, Phase 2 manifest deletion provides the same guarantee: every
+#   manifest whose tags are all reclaimed is then deleted by digest via the
+#   Hub REST API.  Purge still honours dry-run mode and remains idempotent
+#   (HTTP 400/404 → already gone → not an error).
 #   Purge is auto-enabled on the last-day-of-month schedule (see SCHEDULING).
 #
 # SCHEDULING
@@ -736,6 +744,47 @@ jobs:
             fi
           }
 
+          # ── Helper: idempotent DELETE of one Docker Hub manifest by digest ──
+          # Phase 2 cleanup: removes the actual manifest blob (Image Index or
+          # platform image) so Docker Hub reclaims the storage layer.
+          #
+          # ENDPOINT: hub.docker.com Hub REST API — NOT registry-1.docker.io
+          # (the OCI distribution endpoint rejects digest DELETE with
+          # "UNSUPPORTED"; the Hub API accepts it and is authenticated with the
+          # same JWT issued by dockerhub_login).
+          #
+          # Same retry / dry-run / idempotency contract as dockerhub_delete_tag:
+          #   "deleted"          → manifest was removed (or dry-run no-op)
+          #   "skipped"          → HTTP 400/404, already gone; not an error
+          #   "error:<http>:<…>" → unexpected failure; caller increments ERRORS
+          dockerhub_delete_manifest_by_digest() {
+            local digest="$1" url resp http body
+            if [[ "${DRY_RUN}" == 'true' ]]; then
+              echo "deleted"
+              return 0
+            fi
+            url="https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${IMAGE_REPO}/manifests/${digest}"
+            resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
+            http=$(printf '%s' "${resp}" | tail -n1)
+            body=$(printf '%s' "${resp}" | sed '$d')
+            if [[ "${http}" == "401" ]]; then
+              echo "    🔄 Docker Hub JWT expired mid-manifest-delete (HTTP 401) — re-authenticating..." >&2
+              dockerhub_login
+              resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
+              http=$(printf '%s' "${resp}" | tail -n1)
+              body=$(printf '%s' "${resp}" | sed '$d')
+            fi
+            sleep "${API_DELETE_DELAY_SECONDS}"
+            if [[ "${http}" =~ ^2 ]]; then
+              echo "deleted"
+            elif [[ "${http}" == "400" || "${http}" == "404" ]]; then
+              echo "skipped"
+            else
+              echo "error:${http}:${body:0:200}"
+              return 1
+            fi
+          }
+
           # ── Helper: retry a delete with exponential backoff on transient
           #    failures (HIGH-1). Only HTTP 429 (rate-limited) and 5xx (server
           #    error) are retried — both are plausibly transient. Any other
@@ -793,6 +842,59 @@ jobs:
             esac
           }
 
+          # ── Phase 2 digest-tracking state ────────────────────────────────────
+          # During Phase 1 (tag enumeration), every tag's JSON already contains
+          # the parent manifest digest (.digest) and the list of child platform-
+          # image digests (.images[].digest).  We accumulate four sets:
+          #
+          #   KEPT_PARENT_DIGESTS  — Image Index digests of kept tags.
+          #   KEPT_CHILD_DIGESTS   — platform-image digests of kept parents.
+          #   CAND_PARENT_DIGESTS  — Image Index digests whose tags are deleted.
+          #   CAND_CHILD_DIGESTS   — platform-image digests of candidate parents.
+          #
+          # Phase 2 (after Phase 1) deletes every digest in CAND_* that is NOT
+          # also in the corresponding KEPT_* set.  Deletion order: parents
+          # (Image Indexes) first, then children (platform images).  This avoids
+          # leaving broken parent references visible in the Hub UI between the
+          # two phases.
+          #
+          # Requires bash 4+ associative arrays; ubuntu-latest ships bash 5.x. ✓
+          # Scope: manifests visible from /tags in this run only.  Pre-existing
+          # untagged orphans (from earlier runs before this fix) are not
+          # discoverable via /tags and are outside Phase 2's reach.
+          declare -A KEPT_PARENT_DIGESTS=()
+          declare -A KEPT_CHILD_DIGESTS=()
+          declare -A CAND_PARENT_DIGESTS=()
+          declare -A CAND_CHILD_DIGESTS=()
+
+          # ── Helper: record the current tag's digests as KEPT ─────────────────
+          # Reads TAG_DIGEST and _TAG_CHILD_DIGESTS from the calling scope
+          # (both are set once per tag before any keep/delete branch runs).
+          # A digest may appear in multiple tags (multi-tagged manifests);
+          # one KEPT registration is sufficient to protect it.
+          _dh_track_as_kept() {
+            local d="${1:-}" c
+            [[ -n "${d}" ]] && KEPT_PARENT_DIGESTS["${d}"]=1
+            if [[ ${#_TAG_CHILD_DIGESTS[@]} -gt 0 ]]; then
+              for c in "${_TAG_CHILD_DIGESTS[@]}"; do
+                [[ -n "${c}" ]] && KEPT_CHILD_DIGESTS["${c}"]=1
+              done
+            fi
+          }
+
+          # ── Helper: record the current tag's digests as deletion candidates ──
+          # Called when we intend to delete a tag.  If the same digest is also
+          # protected by a kept tag, the KEPT_* sets take priority in Phase 2.
+          _dh_track_as_candidate() {
+            local d="${1:-}" c
+            [[ -n "${d}" ]] && CAND_PARENT_DIGESTS["${d}"]=1
+            if [[ ${#_TAG_CHILD_DIGESTS[@]} -gt 0 ]]; then
+              for c in "${_TAG_CHILD_DIGESTS[@]}"; do
+                [[ -n "${c}" ]] && CAND_CHILD_DIGESTS["${c}"]=1
+              done
+            fi
+          }
+
           # ── Paginate through all tags ────────────────────────────────────────
           # Docker Hub paginates with a 'next' URL; empty/null signals last page.
           # 'ordering=last_updated' ensures newest tags come first (faster for
@@ -831,16 +933,31 @@ jobs:
               TAG_PUSHED=$(echo "${TAG_JSON}" | jq -r \
                 '.tag_last_pushed // .last_updated // empty')
 
+              # ── Phase 2: collect parent + child digests for this tag ───────
+              # .digest       = the Image Index (or plain image) manifest digest.
+              # .images[].digest = child platform-image digests (may be empty for
+              #                    single-arch tags or tags with no images array).
+              # Both are extracted once here so every keep/delete branch below
+              # can call _dh_track_as_kept or _dh_track_as_candidate without
+              # re-parsing TAG_JSON.
+              TAG_DIGEST=$(printf '%s' "${TAG_JSON}" | jq -r '.digest // empty')
+              mapfile -t _TAG_CHILD_DIGESTS < <(
+                printf '%s' "${TAG_JSON}" \
+                  | jq -r '.images // [] | .[].digest // empty' 2>/dev/null \
+                || true)
+
               # ── PURGE MODE: bypass age + ignore patterns entirely ──────────
               if [[ "${PURGE}" == 'true' ]]; then
                 if purge_is_kept "${TAG_NAME}"; then
                   echo "  🔒 PURGE-KEEP   ${TAG_NAME}  (matches purge keep pattern)"
                   IGNORED=$(( IGNORED + 1 ))
+                  _dh_track_as_kept "${TAG_DIGEST}"
                   continue
                 fi
                 echo "  🔥 PURGE-DELETE ${TAG_NAME}  (pushed ${TAG_PUSHED:-unknown})"
                 _apply_delete_result "$(with_retry dockerhub_delete_tag "${TAG_NAME}")" \
                   "${TAG_NAME}" DELETED SKIPPED ERRORS
+                _dh_track_as_candidate "${TAG_DIGEST}"
                 continue
               fi
 
@@ -848,6 +965,7 @@ jobs:
               if tag_is_ignored "${TAG_NAME}"; then
                 echo "  🔒 IGNORE  ${TAG_NAME}  (matches ignore pattern)"
                 IGNORED=$(( IGNORED + 1 ))
+                _dh_track_as_kept "${TAG_DIGEST}"
                 continue
               fi
 
@@ -855,6 +973,7 @@ jobs:
               if [[ -z "${TAG_PUSHED}" ]]; then
                 echo "  ✅ KEEP    ${TAG_NAME}  (no push timestamp — kept by default)"
                 KEPT=$(( KEPT + 1 ))
+                _dh_track_as_kept "${TAG_DIGEST}"
                 continue
               fi
 
@@ -866,6 +985,7 @@ jobs:
               if [[ -z "${TAG_EPOCH}" || ! "${TAG_EPOCH}" =~ ^[0-9]+$ ]]; then
                 echo "  ✅ KEEP    ${TAG_NAME}  (unparsable timestamp '${TAG_PUSHED}' — kept by default)"
                 KEPT=$(( KEPT + 1 ))
+                _dh_track_as_kept "${TAG_DIGEST}"
                 continue
               fi
               # ── Per-policy cutoff resolution ────────────────────────────────
@@ -878,12 +998,14 @@ jobs:
               if [[ -z "${TAG_CUTOFF_EPOCH}" ]]; then
                 echo "  ✅ KEEP    ${TAG_NAME}  (policy keep_days=-1 — kept forever)"
                 KEPT=$(( KEPT + 1 ))
+                _dh_track_as_kept "${TAG_DIGEST}"
                 continue
               fi
 
               if (( TAG_EPOCH >= TAG_CUTOFF_EPOCH )); then
                 echo "  ✅ KEEP    ${TAG_NAME}  (pushed ${TAG_PUSHED}, keep_days=${TAG_KEEP_DAYS})"
                 KEPT=$(( KEPT + 1 ))
+                _dh_track_as_kept "${TAG_DIGEST}"
                 continue
               fi
 
@@ -892,6 +1014,7 @@ jobs:
               echo "  🗑️  DELETE  ${TAG_NAME}  (pushed ${TAG_PUSHED}, keep_days=${TAG_KEEP_DAYS}, before cutoff ${TAG_CUTOFF_DATE})"
               _apply_delete_result "$(with_retry dockerhub_delete_tag "${TAG_NAME}")" \
                 "${TAG_NAME}" DELETED SKIPPED ERRORS
+              _dh_track_as_candidate "${TAG_DIGEST}"
             done < <(echo "${RESPONSE}" | jq -c '.results[]')
           done
 
@@ -932,6 +1055,66 @@ jobs:
             ERRORS=$(( ERRORS + EXPLICIT_ERRORS ))
           fi
 
+          # ════════════════════════════════════════════════════════════════
+          # Phase 2 — Delete manifest blobs by digest (Docker Hub Hub API)
+          # ════════════════════════════════════════════════════════════════
+          # Phase 1 deleted tags (name pointers).  The underlying Image Index
+          # and platform-image manifests remain until explicitly deleted by
+          # digest.  This phase deletes every manifest collected in
+          # CAND_PARENT/CHILD_DIGESTS that is NOT also in KEPT_PARENT/CHILD.
+          #
+          # Deletion order: parents (Image Indexes) first, then children
+          # (platform images).  This ensures that at no point is a live parent
+          # manifest left referencing already-deleted children, which would
+          # produce broken references visible in the Hub UI between deletes.
+          #
+          # Idempotent: HTTP 400/404 on any manifest means it is already gone
+          # (e.g. Docker Hub cascade-deleted a child when its parent was
+          # removed).  These are counted as MANIFEST_SKIPPED, not errors.
+          echo ""
+          echo "🗂️  Phase 2: deleting manifest blobs by digest (Hub REST API)…"
+
+          MANIFEST_DELETED=0
+          MANIFEST_SKIPPED=0
+          MANIFEST_ERRORS=0
+
+          # ── 2-a: parent Image Index manifests ─────────────────────────────
+          # Delete Image Indexes whose every pointing tag was reclaimed.
+          # A digest present in KEPT_PARENT_DIGESTS means at least one kept
+          # tag still references it — skip those.
+          if [[ ${#CAND_PARENT_DIGESTS[@]} -gt 0 ]]; then
+            for parent_digest in "${!CAND_PARENT_DIGESTS[@]}"; do
+              # Protected by a kept tag → leave it alone.
+              [[ -n "${KEPT_PARENT_DIGESTS[${parent_digest}]+x}" ]] && continue
+              echo "  🗑️  DELETE manifest (index)  ${parent_digest}"
+              _apply_delete_result \
+                "$(with_retry dockerhub_delete_manifest_by_digest "${parent_digest}")" \
+                "${parent_digest}" MANIFEST_DELETED MANIFEST_SKIPPED MANIFEST_ERRORS
+            done
+          fi
+
+          # ── 2-b: child platform-image manifests ───────────────────────────
+          # Delete platform images (linux/amd64, linux/arm64, attestations…)
+          # that were children of reclaimed Image Indexes.  Skip any whose
+          # parent was kept (they remain referenced) or that were also
+          # directly used as a kept parent (edge case: single-arch non-index).
+          if [[ ${#CAND_CHILD_DIGESTS[@]} -gt 0 ]]; then
+            for child_digest in "${!CAND_CHILD_DIGESTS[@]}"; do
+              # Referenced by a kept parent → keep.
+              [[ -n "${KEPT_CHILD_DIGESTS[${child_digest}]+x}" ]] && continue
+              # Is itself a kept parent (single-arch without Index wrapper) → keep.
+              [[ -n "${KEPT_PARENT_DIGESTS[${child_digest}]+x}" ]] && continue
+              echo "  🗑️  DELETE manifest (child)  ${child_digest}"
+              _apply_delete_result \
+                "$(with_retry dockerhub_delete_manifest_by_digest "${child_digest}")" \
+                "${child_digest}" MANIFEST_DELETED MANIFEST_SKIPPED MANIFEST_ERRORS
+            done
+          fi
+
+          if [[ $(( MANIFEST_DELETED + MANIFEST_SKIPPED + MANIFEST_ERRORS )) -eq 0 ]]; then
+            echo "   (no manifest digests to reclaim — Phase 1 kept all referenced digests)"
+          fi
+
           # ── Step summary ──────────────────────────────────────────────────
           # (MEDIUM-3) One-liner form, consistent with the other two registry
           # steps — previously this step alone used a 4-line if/else for the
@@ -940,11 +1123,16 @@ jobs:
           [[ "${DRY_RUN}" == 'true' ]] && DRY_LABEL=" (dry-run)"
           echo ""
           echo "📊 Docker Hub cleanup complete:"
+          echo "   Phase 1 — tags"
           echo "   Would delete / Deleted : ${DELETED}${DRY_LABEL}"
           echo "   Kept    : ${KEPT}"
           echo "   Ignored : ${IGNORED}"
           echo "   Skipped : ${SKIPPED}  (already gone — idempotent no-ops, not errors)"
           echo "   Errors  : ${ERRORS}"
+          echo "   Phase 2 — manifest digests (Hub REST API)"
+          echo "   Manifests deleted : ${MANIFEST_DELETED}${DRY_LABEL}"
+          echo "   Manifests skipped : ${MANIFEST_SKIPPED}  (already gone — idempotent no-ops)"
+          echo "   Manifests errors  : ${MANIFEST_ERRORS}"
 
           # (MEDIUM-2) Export per-registry counts as step outputs so the final
           # job-summary step can render them without re-parsing this step's log.
@@ -954,9 +1142,12 @@ jobs:
             echo "ignored=${IGNORED}"
             echo "skipped=${SKIPPED}"
             echo "errors=${ERRORS}"
+            echo "manifest_deleted=${MANIFEST_DELETED}"
+            echo "manifest_skipped=${MANIFEST_SKIPPED}"
+            echo "manifest_errors=${MANIFEST_ERRORS}"
           } >> "${GITHUB_OUTPUT}"
 
-          if [[ "${ERRORS}" -gt 0 ]]; then
+          if [[ "${ERRORS}" -gt 0 || "${MANIFEST_ERRORS}" -gt 0 ]]; then
             exit 1
           fi
 
