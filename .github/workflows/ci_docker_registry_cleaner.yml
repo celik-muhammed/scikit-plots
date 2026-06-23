@@ -178,6 +178,7 @@ on:
           ALL other tags sharing that digest — this is logged before acting.
           Honours dry-run mode.  Leave empty to skip explicit deletion.
           Example: dependabot_pip_scipy-openblas64-0.3.33.0.0-6f491e8,old-branch-abc123
+          Example: sha256:aeaa3654dc46,sha256:fca474c69ae6,sha256:c5b75bebd0f4
         required: false
         type: string
         default: ''
