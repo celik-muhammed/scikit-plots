@@ -57,7 +57,7 @@
 #   Quay, untagged manifests carry no tags and are always reclaimed.  For
 #   Docker Hub, Phase 2 manifest deletion provides the same guarantee: every
 #   manifest whose tags are all reclaimed is then deleted by digest via the
-#   Hub REST API.  Purge still honours dry-run mode and remains idempotent
+#   Registry API v2 (registry-1.docker.io).  Purge still honours dry-run mode and remains idempotent
 #   (HTTP 400/404 → already gone → not an error).
 #   Purge is auto-enabled on the last-day-of-month schedule (see SCHEDULING).
 #
@@ -752,11 +752,10 @@ jobs:
           # Phase 2 cleanup: removes the actual manifest blob (Image Index or
           # platform image) so Docker Hub reclaims the storage layer.
           #
-          # ENDPOINT: registry-1.docker.io (Registry API v2), not Hub REST API.
-          # ENDPOINT: hub.docker.com Hub REST API — NOT registry-1.docker.io
-          # (the OCI distribution endpoint rejects digest DELETE with
-          # "UNSUPPORTED"; the Hub API accepts it and is authenticated with the
-          # same JWT issued by dockerhub_login).
+          # ENDPOINT: registry-1.docker.io/v2/.../manifests/{digest}  (Registry API v2)
+          #   Auth via dockerhub_registry_login (auth.docker.io, delete scope)
+          #   → REGISTRY_AUTH_HEADER.  Previously the Hub REST API (hub.docker.com)
+          #   rejected digest DELETE with "UNSUPPORTED"; Registry API v2 now accepts it.
           #
           # Same retry / dry-run / idempotency contract as dockerhub_delete_tag:
           #   "deleted"          → manifest was removed (or dry-run no-op)
@@ -768,17 +767,13 @@ jobs:
               echo "deleted"
               return 0
             fi
-            # url="https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${IMAGE_REPO}/manifests/${digest}"
-            # resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
             url="https://registry-1.docker.io/v2/${IMAGE_NAMESPACE}/${IMAGE_REPO}/manifests/${digest}"
             resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${REGISTRY_AUTH_HEADER}" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "${url}")
             http=$(printf '%s' "${resp}" | tail -n1)
             body=$(printf '%s' "${resp}" | sed '$d')
             if [[ "${http}" == "401" ]]; then
-              echo "    🔄 Docker Hub JWT expired mid-manifest-delete (HTTP 401) — re-authenticating..." >&2
-              # dockerhub_login
+              echo "    🔄 Registry API token expired mid-manifest-delete (HTTP 401) — re-authenticating..." >&2
               dockerhub_registry_login
-              # resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
               resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${REGISTRY_AUTH_HEADER}" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "${url}")
               http=$(printf '%s' "${resp}" | tail -n1)
               body=$(printf '%s' "${resp}" | sed '$d')
@@ -1063,7 +1058,7 @@ jobs:
                 # Ensure we have the Registry V2 token, which is required for digest deletion
                 if [[ -z "${DH_REGISTRY_TOKEN:-}" ]]; then
                   dockerhub_registry_login
-                  echo "✅ Authenticated with Docker Registry API (delete scope) for explicit digest."
+                  echo "✅ Authenticated with Docker Registry API (delete scope)."
                 fi
                 _apply_delete_result "$(with_retry dockerhub_delete_manifest_by_digest "${etag}")" \
                   "${etag}" EXPLICIT_DELETED EXPLICIT_SKIPPED EXPLICIT_ERRORS
@@ -1080,7 +1075,7 @@ jobs:
           fi
 
           # ════════════════════════════════════════════════════════════════
-          # Phase 2 — Delete manifest blobs by digest (Docker Hub Hub API)
+          # Phase 2 — Delete manifest blobs by digest (Docker Hub Registry API v2)
           # ════════════════════════════════════════════════════════════════
           # Phase 1 deleted tags (name pointers).  The underlying Image Index
           # and platform-image manifests remain until explicitly deleted by
@@ -1096,7 +1091,7 @@ jobs:
           # (e.g. Docker Hub cascade-deleted a child when its parent was
           # removed).  These are counted as MANIFEST_SKIPPED, not errors.
           echo ""
-          echo "🗂️  Phase 2: deleting manifest blobs by digest (Hub REST API)…"
+          echo "🗂️  Phase 2: deleting manifest blobs by digest (Registry API v2)…"
 
           MANIFEST_DELETED=0
           MANIFEST_SKIPPED=0
@@ -1158,7 +1153,7 @@ jobs:
           echo "   Ignored : ${IGNORED}"
           echo "   Skipped : ${SKIPPED}  (already gone — idempotent no-ops, not errors)"
           echo "   Errors  : ${ERRORS}"
-          echo "   Phase 2 — manifest digests (Hub REST API)"
+          echo "   Phase 2 — manifest digests (Registry API v2)"
           echo "   Manifests deleted : ${MANIFEST_DELETED}${DRY_LABEL}"
           echo "   Manifests skipped : ${MANIFEST_SKIPPED}  (already gone — idempotent no-ops)"
           echo "   Manifests errors  : ${MANIFEST_ERRORS}"
