@@ -1054,9 +1054,24 @@ jobs:
               # The live/dry-run distinction is surfaced exactly once, via
               # the DRY_LABEL suffix on the step summary's deleted count,
               # rather than duplicated at every line that logs a delete.
-              echo "  🗑️  DELETE (explicit)  ${etag}"
-              _apply_delete_result "$(with_retry dockerhub_delete_tag "${etag}")" \
-                "${etag}" EXPLICIT_DELETED EXPLICIT_SKIPPED EXPLICIT_ERRORS
+              # INNOVATION: If the user provides a sha256 digest directly, target the manifest blob.
+              # grep -o 'sha256:[a-f0-9]*' digests.txt | paste -sd ',' -
+              # grep -o 'sha256:[a-f0-9]*' digests.txt | sort -u | paste -sd ',' -
+              if [[ "${etag}" == sha256:* ]]; then
+                echo "  🗑️  DELETE manifest (explicit digest)  ${etag}"
+                # Ensure we have the Registry V2 token, which is required for digest deletion
+                if [[ -z "${DH_REGISTRY_TOKEN:-}" ]]; then
+                  dockerhub_registry_login
+                  echo "✅ Authenticated with Docker Registry API (delete scope) for explicit digest."
+                fi
+                _apply_delete_result "$(with_retry dockerhub_delete_manifest_by_digest "${etag}")" \
+                  "${etag}" EXPLICIT_DELETED EXPLICIT_SKIPPED EXPLICIT_ERRORS
+              else
+                # Standard tag deletion
+                echo "  🗑️  DELETE tag (explicit name)  ${etag}"
+                _apply_delete_result "$(with_retry dockerhub_delete_tag "${etag}")" \
+                  "${etag}" EXPLICIT_DELETED EXPLICIT_SKIPPED EXPLICIT_ERRORS
+              fi
             done
             echo "   Explicit: deleted=${EXPLICIT_DELETED}  skipped=${EXPLICIT_SKIPPED}  errors=${EXPLICIT_ERRORS}"
             SKIPPED=$(( SKIPPED + EXPLICIT_SKIPPED ))
