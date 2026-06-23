@@ -14,18 +14,15 @@
 #   2. Manual   (workflow_dispatch): full parameter control via GitHub UI or CLI.
 #
 # REGISTRY SUPPORT
-#   docker_hub    fully implemented — Docker Hub v2 REST API (JWT auth).
+#   docker_hub    fully implemented — Docker Hub v2 REST API + Registry API v2.
 #                 Two-phase cleanup: Phase 1 removes named tags via the Hub
-#                 tag endpoint; Phase 2 deletes the underlying manifests by
-#                 digest via the Hub REST endpoint:
-#                   DELETE hub.docker.com/.../manifests/{digest}
-#                 This is the Hub API (hub.docker.com), NOT the OCI
-#                 distribution API (registry-1.docker.io) which does reject
-#                 DELETE by digest with "UNSUPPORTED" for Docker Hub.
-#                 Digests are collected from the /tags response during Phase 1
-#                 enumeration; any parent (Image Index) or child (platform
-#                 image) manifest whose ALL pointing tags were reclaimed is
-#                 deleted in Phase 2.  Now has full parity with GHCR/Quay.
+#                 REST API (/v2/repositories/.../tags); Phase 2 deletes the
+#                 underlying manifests by digest via the Docker Hub Registry
+#                 API v2 (registry-1.docker.io/v2/.../manifests).
+#                 Historically, Docker Hub disabled manifest deletion on the
+#                 Registry API (returning "UNSUPPORTED"), but it is now enabled
+#                 for Image Management cleanup. Phase 2 authenticates against
+#                 auth.docker.io with `delete` scope to purge untagged layers.
 #                 Scope: manifests discovered this run only — pre-existing
 #                 untagged digests (orphaned before this run) are not visible
 #                 from /tags and are outside Phase 2's reach.
@@ -198,14 +195,6 @@ on:
           Ignored completely when cleanup_purge is true (purge bypasses all policies).
           Leave empty to use the global cleanup_keep_days for every tag (default
           behaviour — fully backward compatible).
-          Example (scikit-plots wheel matrix):
-            [
-              {"pattern":"^Wheel-3\\.9-",  "keep_days":7,  "label":"py39 wheels"},
-              {"pattern":"^Wheel-3\\.10-", "keep_days":14, "label":"py310 wheels"},
-              {"pattern":"^Wheel-3\\.11-", "keep_days":30, "label":"py311 wheels"},
-              {"pattern":"^v[0-9]",        "keep_days":90, "label":"release tags"},
-              {"pattern":"^latest$",       "keep_days":-1, "label":"latest pointer"}
-            ]
         required: false
         type: string
         default: ''
@@ -643,6 +632,20 @@ jobs:
             AUTH_HEADER="Authorization: Bearer ${DH_JWT}"
           }
 
+          # ── Helper: Authenticate with Docker Registry API (for manifests) ────
+          dockerhub_registry_login() {
+            local token
+            token=$(curl -fsSL -u "${DOCKERHUB_USERNAME}:${DOCKERHUB_TOKEN}" \
+              "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${IMAGE_NAMESPACE}/${IMAGE_REPO}:pull,push,delete" \
+              | jq -r '.token // empty')
+            if [[ -z "${token}" ]]; then
+              echo "❌ Docker Hub Registry auth returned an empty token." >&2
+              exit 1
+            fi
+            DH_REGISTRY_TOKEN="${token}"
+            REGISTRY_AUTH_HEADER="Authorization: Bearer ${DH_REGISTRY_TOKEN}"
+          }
+
           dockerhub_login
           echo "✅ Authenticated with Docker Hub."
 
@@ -748,6 +751,7 @@ jobs:
           # Phase 2 cleanup: removes the actual manifest blob (Image Index or
           # platform image) so Docker Hub reclaims the storage layer.
           #
+          # ENDPOINT: registry-1.docker.io (Registry API v2), not Hub REST API.
           # ENDPOINT: hub.docker.com Hub REST API — NOT registry-1.docker.io
           # (the OCI distribution endpoint rejects digest DELETE with
           # "UNSUPPORTED"; the Hub API accepts it and is authenticated with the
@@ -763,19 +767,23 @@ jobs:
               echo "deleted"
               return 0
             fi
-            url="https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${IMAGE_REPO}/manifests/${digest}"
-            resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
+            # url="https://hub.docker.com/v2/repositories/${IMAGE_NAMESPACE}/${IMAGE_REPO}/manifests/${digest}"
+            # resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
+            url="https://registry-1.docker.io/v2/${IMAGE_NAMESPACE}/${IMAGE_REPO}/manifests/${digest}"
+            resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${REGISTRY_AUTH_HEADER}" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "${url}")
             http=$(printf '%s' "${resp}" | tail -n1)
             body=$(printf '%s' "${resp}" | sed '$d')
             if [[ "${http}" == "401" ]]; then
               echo "    🔄 Docker Hub JWT expired mid-manifest-delete (HTTP 401) — re-authenticating..." >&2
-              dockerhub_login
-              resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
+              # dockerhub_login
+              dockerhub_registry_login
+              # resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${AUTH_HEADER}" "${url}")
+              resp=$(curl -s -w '\n%{http_code}' -X DELETE -H "${REGISTRY_AUTH_HEADER}" -H "Accept: application/vnd.docker.distribution.manifest.v2+json" "${url}")
               http=$(printf '%s' "${resp}" | tail -n1)
               body=$(printf '%s' "${resp}" | sed '$d')
             fi
             sleep "${API_DELETE_DELAY_SECONDS}"
-            if [[ "${http}" =~ ^2 ]]; then
+            if [[ "${http}" =~ ^2 || "${http}" == "202" ]]; then
               echo "deleted"
             elif [[ "${http}" == "400" || "${http}" == "404" ]]; then
               echo "skipped"
@@ -1077,6 +1085,11 @@ jobs:
           MANIFEST_DELETED=0
           MANIFEST_SKIPPED=0
           MANIFEST_ERRORS=0
+
+          if [[ ${#CAND_PARENT_DIGESTS[@]} -gt 0 || ${#CAND_CHILD_DIGESTS[@]} -gt 0 ]]; then
+            dockerhub_registry_login
+            echo "✅ Authenticated with Docker Registry API (delete scope)."
+          fi
 
           # ── 2-a: parent Image Index manifests ─────────────────────────────
           # Delete Image Indexes whose every pointing tag was reclaimed.
