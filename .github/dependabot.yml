@@ -129,8 +129,20 @@ updates:
       # Fix: enumerate only the directories Dependabot should actually scan.
       # Source: `"directories":[…]` in the CI job definition log (2026-06-26).
       # ⚠ When adding a new pip manifest directory to the repo, add it here too.
+      #
+      # ── /docker/env_pipenv OMITTED (parent-directory expansion) ──────────────
+      # DO NOT add `/docker/env_pipenv` here even though it contains a Pipfile.
+      # When a parent directory is listed, Dependabot recursively scans its
+      # children for pip manifests and silently EXPANDS the job's `directories`
+      # list. Job #40 proved this: config had 14 explicit entries (no py38/py39),
+      # but the job received 16 — Dependabot added py38 and py39 by scanning the
+      # `/docker/env_pipenv` subtree. Since exclude-paths is broken for pip, the
+      # only fix is to never list a directory that has EOL-version subdirectories.
+      # `/docker/env_pipenv/Pipfile` (python_version = "3.11") is already covered
+      # by `/docker/env_pipenv/py311` below.
       - "/.binder"
-      - "/docker/env_pipenv"
+      # /docker/env_pipenv          ← OMITTED: listing the parent expands subtree,
+      #                               adds py38 + py39 (EOL) to job directories.
       - "/docker/env_pipenv/py310"
       - "/docker/env_pipenv/py311"
       - "/docker/env_pipenv/py312"
