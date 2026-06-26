@@ -120,52 +120,55 @@ updates:
     #                               Dependabot pip updater requires Python 3.10+
     #   /docker/env_pipenv/py39  → Python 3.9 is EOL (since Oct 2025);
     #
-    # directory: /  # /requirements  #  same constraint applies
-    directories:
-      # Root auto-discovery (`- /`) is intentionally NOT used here.
-      # Using `- /` triggers full auto-discovery, which finds py38 and py39.
-      # `exclude-paths` is silently dropped for pip (the updater receives
-      # `"exclude-paths":[]` regardless) — confirmed by filter_excluded log.
-      # Fix: enumerate only the directories Dependabot should actually scan.
-      # Source: `"directories":[…]` in the CI job definition log (2026-06-26).
-      # ⚠ When adding a new pip manifest directory to the repo, add it here too.
-      #
-      # ── /docker/env_pipenv OMITTED (parent-directory expansion) ──────────────
-      # DO NOT add `/docker/env_pipenv` here even though it contains a Pipfile.
-      # When a parent directory is listed, Dependabot recursively scans its
-      # children for pip manifests and silently EXPANDS the job's `directories`
-      # list. Job #40 proved this: config had 14 explicit entries (no py38/py39),
-      # but the job received 16 — Dependabot added py38 and py39 by scanning the
-      # `/docker/env_pipenv` subtree. Since exclude-paths is broken for pip, the
-      # only fix is to never list a directory that has EOL-version subdirectories.
-      # `/docker/env_pipenv/Pipfile` (python_version = "3.11") is already covered
-      # by `/docker/env_pipenv/py311` below.
-      - "/.binder"
-      # /docker/env_pipenv          ← OMITTED: listing the parent expands subtree,
-      #                               adds py38 + py39 (EOL) to job directories.
-      - "/docker/env_pipenv/py310"
-      - "/docker/env_pipenv/py311"
-      - "/docker/env_pipenv/py312"
-      # /docker/env_pipenv/py38 ← OMITTED: py38 EOL Oct 2024; Dependabot pip requires 3.10+
-      # /docker/env_pipenv/py39 ← OMITTED: py39 EOL Oct 2025; Dependabot pip requires 3.10+
-      - "/docs/source/binder"
-      - "/galleries/gateway/plugin/my-llm"
-      - "/requirements"
-      - "/scikitplot/_env/tests/test_package"
-      - "/scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/_hf_spaces_model"
-      - "/scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/_hf_spaces_proxy"
-      - "/scikitplot/cexternals/_annoy"
-      - "/tools/zz_yanked/azure"
-      - "/tools/zz_yanked/pypi_packaging"
+    directory: /  # /requirements  # Not affect graph pipeline performs
+    # TODO: The graph pipeline performs its own manifest discovery.
+    # It discovers the legacy py38/py39 Pipfiles.
+    # Their python_version = "3.8" / "3.9" declarations cause an immediate hard failure because Dependabot only supports Python 3.10+ for graph generation.
+    # directories:
+    #   # Root auto-discovery (`- /`) is intentionally NOT used here.
+    #   # Using `- /` triggers full auto-discovery, which finds py38 and py39.
+    #   # `exclude-paths` is silently dropped for pip (the updater receives
+    #   # `"exclude-paths":[]` regardless) — confirmed by filter_excluded log.
+    #   # Fix: enumerate only the directories Dependabot should actually scan.
+    #   # Source: `"directories":[…]` in the CI job definition log (2026-06-26).
+    #   # ⚠ When adding a new pip manifest directory to the repo, add it here too.
+    #   #
+    #   # ── /docker/env_pipenv OMITTED (parent-directory expansion) ──────────────
+    #   # DO NOT add `/docker/env_pipenv` here even though it contains a Pipfile.
+    #   # When a parent directory is listed, Dependabot recursively scans its
+    #   # children for pip manifests and silently EXPANDS the job's `directories`
+    #   # list. Job #40 proved this: config had 14 explicit entries (no py38/py39),
+    #   # but the job received 16 — Dependabot added py38 and py39 by scanning the
+    #   # `/docker/env_pipenv` subtree. Since exclude-paths is broken for pip, the
+    #   # only fix is to never list a directory that has EOL-version subdirectories.
+    #   # `/docker/env_pipenv/Pipfile` (python_version = "3.11") is already covered
+    #   # by `/docker/env_pipenv/py311` below.
+    #   - "/.binder"
+    #   # /docker/env_pipenv          ← OMITTED: listing the parent expands subtree,
+    #   #                               adds py38 + py39 (EOL) to job directories.
+    #   - "/docker/env_pipenv/py310"
+    #   - "/docker/env_pipenv/py311"
+    #   - "/docker/env_pipenv/py312"
+    #   # /docker/env_pipenv/py38 ← OMITTED: py38 EOL Oct 2024; Dependabot pip requires 3.10+
+    #   # /docker/env_pipenv/py39 ← OMITTED: py39 EOL Oct 2025; Dependabot pip requires 3.10+
+    #   - "/docs/source/binder"
+    #   - "/galleries/gateway/plugin/my-llm"
+    #   - "/requirements"
+    #   - "/scikitplot/_env/tests/test_package"
+    #   - "/scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/_hf_spaces_model"
+    #   - "/scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/_hf_spaces_proxy"
+    #   - "/scikitplot/cexternals/_annoy"
+    #   - "/tools/zz_yanked/azure"
+    #   - "/tools/zz_yanked/pypi_packaging"
     # https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths-
-    exclude-paths:
-      # "supported-versions": "3.10.*, 3.11.*, 3.12.*, 3.13.*, 3.14.*"
-      - .conda-forge-recipes/**
-      - tools/zz_yanked/cirrus/**
-      - docker/env_pipenv/py38*
-      - docker/env_pipenv/py39*
-      - docker/env_pipenv/py38/**
-      - docker/env_pipenv/py39/**
+    # exclude-paths:
+    #   # "supported-versions": "3.10.*, 3.11.*, 3.12.*, 3.13.*, 3.14.*"
+    #   - .conda-forge-recipes/**
+    #   - tools/zz_yanked/cirrus/**
+    #   - docker/env_pipenv/py38*
+    #   - docker/env_pipenv/py39*
+    #   - docker/env_pipenv/py38/**
+    #   - docker/env_pipenv/py39/**
     schedule:
       interval: weekly  # "daily", weekly, monthly
       # day: "monday"
