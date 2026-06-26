@@ -142,6 +142,8 @@ updates:
     # https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference#exclude-paths-
     exclude-paths:
       # "supported-versions": "3.10.*, 3.11.*, 3.12.*, 3.13.*, 3.14.*"
+      - .conda-forge-recipes/**
+      - tools/zz_yanked/cirrus/**
       - docker/env_pipenv/py38*
       - docker/env_pipenv/py39*
       - docker/env_pipenv/py38/**
