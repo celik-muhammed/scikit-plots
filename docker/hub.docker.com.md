@@ -129,25 +129,28 @@ docker run scikitplot/scikit-plots:latest
 ---
 
 #### run interactive shell (default entrypoint bash)
+
+##### 🚨 By using `-ic "bash -i"`, you are explicitly forcing Bash's hand. The -i flag tells Bash: "I don't care how you were started, force yourself into interactive mode."
+
 ```sh
 # docker run -it --rm scikitplot/scikit-plots:latest
-docker run -it --rm scikitplot/scikit-plots:latest -c bash
+docker run -it --rm scikitplot/scikit-plots:latest -ic "bash -i"
 ```
 
-#### 🛠️ (without interactive shell) See default os python env package list
+#### 🛠️ (with/without interactive shell) See default os python env package list
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest -c "which python && pip list"
+docker run -it --rm scikitplot/scikit-plots:latest -ic "bash -ic 'which python && pip list'"
 ```
 
-#### 🛠️ (with interactive shell) See also pre-installed micromamba python env package list
+#### 🛠️ (with/without interactive shell) See also pre-installed micromamba python env package list
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest -i -c "micromamba info -e"
+docker run -it --rm scikitplot/scikit-plots:latest -ic "bash -ic 'micromamba info -e'"
 ```
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest -ic "which python && pip list"
+docker run -it --rm scikitplot/scikit-plots:latest -ic "bash -ic 'which python && pip list'"
 ```
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest -i -c "scikitplot -V"
+docker run -it --rm scikitplot/scikit-plots:latest -ic "bash -ic 'scikitplot -V'"
 ```
 
 ---
@@ -157,7 +160,7 @@ docker run -it --rm scikitplot/scikit-plots:latest -i -c "scikitplot -V"
 #### 🏷️ fast-minimal (default entrypoint bash)
 ```sh
 # docker run -it --rm scikitplot/scikit-plots:latest -ic "bash -c scikitplot -V"
-docker run -it --rm scikitplot/scikit-plots:latest-python3.11 -c bash
+docker run -it --rm scikitplot/scikit-plots:latest-python3.11 -ic "bash -i"
 ```
 
 ---
@@ -166,22 +169,22 @@ docker run -it --rm scikitplot/scikit-plots:latest-python3.11 -c bash
 
 #### 🏷️ pre-installed os/python packages (default entrypoint tini)
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash
+docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash -ic "bash -i"
 ```
 
 ### 🛠️ See also pre-installed conda/mamba env:
 
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash -i -c "conda info -e"
+docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash -ic "bash -ic 'conda info -e'"
 ```
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash -ic "which python && pip list"
+docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash -ic "bash -ic 'which python && pip list'"
 ```
 ```sh
-docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash -i -c "scikitplot -V"
+docker run -it --rm scikitplot/scikit-plots:latest-jupyter bash -ic "bash -ic 'scikitplot -V'"
 ```
 
-### 🛠️ Update system packages
+### 🛠️ Update system packages (without interactive shell)
 
 ```sh
 docker run -it --rm --user root scikitplot/scikit-plots:latest-jupyter bash -c "apt update"
@@ -218,7 +221,7 @@ docker run -it -v "$(pwd):/work/notebooks:delegated" -p 8891:8891 scikitplot/sci
 ```
 ```sh
 # Optionally start jupyter notebook
-docker run -it --rm -v "$(pwd):/work/notebooks" -p 8891:8891 scikitplot/scikit-plots:latest -i -c "jupyter notebook --notebook-dir=/work --ip=0.0.0.0 --no-browser --allow-root --port=8891"
+docker run -it --rm -v "$(pwd):/work/notebooks" -p 8891:8891 scikitplot/scikit-plots:latest -ic "bash -ic 'jupyter notebook --notebook-dir=/work --ip=0.0.0.0 --no-browser --allow-root --port=8891'"
 ```
 
 #### ⚠️ ("\\") Multi-Line Command path for POSIX shells (Git Bash `$(pwd -W)`, WSL/Linux/macOS `$(pwd)`):
