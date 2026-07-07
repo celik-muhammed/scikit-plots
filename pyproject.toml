@@ -326,7 +326,9 @@ core = [
   "pillow>=6.2.0",                          # Image processing matplotlib handle
 
   # --- Impute Dependency ---
-  "voyager>=1.2.5",                         # fast approximate nearest-neighbor searches on an in-memory collection of vectors.
+  'voyager>=1.2.5;python_version<"3.13"',  # fast approximate nearest-neighbor searches on an in-memory collection of vectors.
+  # For VCS URLs, PEP 508 requires a package name before the @ URL, for maximum compatibility you should include the spaces:
+  'voyager @ git+https://github.com/spotify/voyager.git@v2.1.1 ; python_version >= "3.13"',
 
   # --- Optional Web Interface Dependencies (commented out) ---
   # "docker>=4.0.0,<8",
@@ -607,6 +609,72 @@ ci_requirements = [
 ]
 
 ######################################################################
+## 🔻 Dependency Groups (PEP 735)
+##
+## Dependency groups are intended for development environments and
+## local tooling (for example: uv, IDEs, CI, and contributors).
+##
+## They are NOT published as installable package extras.
+##
+## Examples:
+##
+##   # Install development environment
+##   uv sync --group dev
+##
+##   # Install only the test group
+##   uv sync --group test
+##
+## Unlike [project.optional-dependencies], dependency groups are not
+## part of the package's public API on PyPI.
+##
+## -------------------------------------------------------------------
+## Why both sections exist
+##
+## [project.optional-dependencies]
+##   • Public package extras (PEP 621)
+##   • Available to users after publishing to PyPI
+##   • Installed with:
+##
+##       pip install scikit-plots[test]
+##       pip install scikit-plots[doc]
+##       pip install scikit-plots[gpu]
+##
+##   • Forms part of the project's public interface and should remain
+##     stable for users.
+##
+## [dependency-groups]
+##   • Local development groups (PEP 735)
+##   • Used by development tools such as uv
+##   • Not exposed as package extras on PyPI
+##   • Intended for contributors, CI, and local development
+##
+## The two mechanisms complement each other rather than replace one
+## another. Optional dependencies describe installable package extras,
+## while dependency groups describe development environments.
+##
+## To avoid maintaining duplicate dependency lists, development groups
+## may reference the project's existing optional extras whenever
+## appropriate.
+##
+## References
+## ----------
+## PEP 621 - Project metadata:
+## https://peps.python.org/pep-0621/
+##
+## PEP 735 - Dependency Groups:
+## https://peps.python.org/pep-0735/
+######################################################################
+
+# ✅ uv sync --group dev installs the same environment.
+[dependency-groups]
+dev = [
+    "scikit-plots[build]",
+    "scikit-plots[dev]",
+    "scikit-plots[test]",
+    "scikit-plots[doc]",
+]
+
+######################################################################
 ## pip, uv
 ######################################################################
 
@@ -704,10 +772,14 @@ openai = "scikitplot.deployments.openai"
 [tool.pytest.ini_options]
 minversion = "6.0"  # Specify the minimum version of pytest
 log_cli_level = "info"
+log_level = "info"
+
 xfail_strict = true
+
 filterwarnings = [
   "error",
 ]
+
 ## Add command-line options
 addopts = [
   "--color=yes",

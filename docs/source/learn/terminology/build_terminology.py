@@ -4,7 +4,7 @@
 # ----------------------------------------------------------------------
 # Reads the verified inventory (term_inventory.tsv: title <TAB> url ...)
 # joins it with the ENRICH table below (theme + rewritten gloss), and
-# emits a complete, idempotent terminology/index.rst:
+# emits a complete, idempotent index.rst (in place, inside terminology/):
 #   * centred banner + intro + how-to note
 #   * "Discovery at a Glance" tab-set (by level) -> theme section cards
 #   * one section per theme, each term a sphinx_design dropdown carrying
@@ -26,8 +26,9 @@ import unicodedata
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))          # make term_content importable regardless of CWD
 INVENTORY = HERE / "term_inventory.tsv"
-OUT = HERE / "terminology" / "index.rst"
+OUT = HERE / "index.rst"               # this script now lives INSIDE terminology/
 
 # ----------------------------------------------------------------------
 # Theme registry: key -> (emoji, display title, level, one-line blurb)
@@ -663,7 +664,7 @@ def load_inventory() -> list[tuple[str, str]]:
 # Re-runnable: same inputs -> identical tree. Old NNN-*.rst are cleared
 # first so the set never drifts.
 # ----------------------------------------------------------------------
-PAGES_DIR = HERE / "terminology"
+PAGES_DIR = HERE                        # NNN-*.rst pages are siblings of this script
 RAW_HTML = ".. role:: raw-html(raw)\n   :format: html"
 LEVEL_WORD = {"foundations": "beginner", "applied": "intermediate", "advanced": "advanced"}
 
@@ -856,7 +857,48 @@ def main() -> int:
       f"learning, forecasting and MLOps. Every term has **its own page** with a "
       f"self-contained explanation — no need to leave to read the full context. "
       f"Entries are grouped into **{len(active_themes)} themes** across three depth "
-      f"levels; browse a theme below or open any term directly.")
+      f"levels. **Type in the filter box** for instant lookup by name or keyword, "
+      f"expand a theme to browse, or open the A–Z index at the bottom.")
+    w("")
+
+    # ---- live filter: type-to-search across every term (progressive JS) ----
+    # Static, dependency-free, deterministic. Without JS the page degrades
+    # gracefully to plain collapsible dropdowns.
+    n_terms = len(inv_titles)
+    w(".. raw:: html")
+    w("")
+    w('   <div style="text-align:center;margin:0.4rem 0 0.4rem">')
+    w('   <input id="term-filter" type="search" autocomplete="off" spellcheck="false"')
+    w(f'          placeholder="&#128269;&nbsp; Type to filter {n_terms} terms &mdash; by name or keyword&hellip;"')
+    w('          style="width:100%;max-width:680px;padding:0.55rem 1rem;font-size:1rem;')
+    w('                 border:1px solid rgba(128,128,128,0.45);border-radius:0.55rem;')
+    w('                 background:transparent;color:inherit"/>')
+    w('   <div id="term-filter-count" style="opacity:0.65;font-size:0.85rem;')
+    w('        min-height:1.2em;margin-top:0.35rem"></div>')
+    w("   </div>")
+    w("   <script>")
+    w("   document.addEventListener('DOMContentLoaded',function(){")
+    w("     var inp=document.getElementById('term-filter');if(!inp){return;}")
+    w("     var dds=[].slice.call(document.querySelectorAll('details.sd-dropdown'));")
+    w("     var az=document.querySelector('details.term-az');")
+    w("     var items=[];")
+    w("     dds.forEach(function(d){[].slice.call(d.querySelectorAll('li')).forEach(")
+    w("       function(li){items.push({li:li,d:d,t:li.textContent.toLowerCase()});});});")
+    w("     var cnt=document.getElementById('term-filter-count');")
+    w("     inp.addEventListener('input',function(){")
+    w("       var q=inp.value.trim().toLowerCase();var n=0;")
+    w("       dds.forEach(function(d){d.tHits=0;});")
+    w("       items.forEach(function(it){")
+    w("         var hit=!q||it.t.indexOf(q)!==-1;")
+    w("         it.li.style.display=hit?'':'none';")
+    w("         if(hit){it.d.tHits+=1;if(az&&it.d===az){n+=1;}}});")
+    w("       dds.forEach(function(d){")
+    w("         if(q){d.style.display=d.tHits?'':'none';d.open=d.tHits>0;}")
+    w("         else{d.style.display='';d.open=false;}});")
+    w("       if(cnt){cnt.textContent=(q&&az)?(n+' matching term'+(n===1?'':'s')):'';}")
+    w("     });")
+    w("   });")
+    w("   </script>")
     w("")
 
     for lvl in LEVEL_ORDER:
@@ -872,23 +914,39 @@ def main() -> int:
         w(head)
         w("-" * (len(head) + 2))
         w("")
-        w(".. grid:: 1 2 2 2")
-        w("   :gutter: 3")
-        w("")
         for k in themes_in:
             emoji, disp, _, blurb = THEMES[k]
             terms = by_theme[k]
-            w(f"   .. grid-item-card:: {emoji} {disp}")
-            w(f"      :name: term-theme-{k}")
-            w("      :class-card: sd-shadow-sm")
+            # stable anchor kept from the card era (referenced externally,
+            # e.g. by the bayesian_data_analysis hub) - do not rename.
+            w(f".. _term-theme-{k}:")
             w("")
-            w(f"      {blurb}")
+            w(f".. dropdown:: {emoji} {disp}  \u00b7  {len(terms)} terms")
+            w("   :animate: fade-in-slide-down")
             w("")
-            w(f"      :bdg-secondary:`{len(terms)} terms`")
-            w("      ^^^")
+            w(f"   *{blurb}*")
+            w("")
+            w("   .. hlist::")
+            w("      :columns: 2")
+            w("")
             for s in terms:
                 w(f"      * :doc:`{s} <{docname[s]}>`")
             w("")
+
+    # ---- dictionary view: one A-Z master list (auto-sorted) ----------
+    az_head = "\U0001F524 Every term, A\u2013Z"
+    w(az_head)
+    w("-" * (len(az_head) + 2))
+    w("")
+    w(".. dropdown:: Open the full alphabetical index")
+    w("   :class-container: term-az")
+    w("")
+    w("   .. hlist::")
+    w("      :columns: 2")
+    w("")
+    for s in sorted(inv_titles, key=str.casefold):
+        w(f"      * :doc:`{s} <{docname[s]}>`")
+    w("")
 
     w("")
     w(".. toctree::")
@@ -901,7 +959,7 @@ def main() -> int:
     OUT.write_text("\n".join(I), encoding="utf-8")
 
     n_pages = len(inv_titles)
-    print(f"Wrote terminology/index.rst + {n_pages} term pages "
+    print(f"Wrote index.rst + {n_pages} term pages "
           f"({n_rich} with full content, {n_pages - n_rich} summary) "
           f"across {len(active_themes)} themes.")
     return 0
