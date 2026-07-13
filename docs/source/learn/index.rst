@@ -6,7 +6,7 @@
 .. Welcome to Scikit-plots 101 |br| |release| - |today|
 
 ..
-    substitutions don’t work in .. raw:: html
+    ✨ substitutions don’t work in .. raw:: html
     .. raw:: html
 
     <div style="text-align: center"><strong>
@@ -63,56 +63,73 @@ Learn
 
     .. grid-item-card::
         :padding: 3
+        :columns: 12 12 6 6
 
         **terminologies**
         ^^^
         .. toctree::
-            :maxdepth: 2
+            :maxdepth: 3
 
             Terminology <./terminology/index.rst>
 
     .. grid-item-card::
         :padding: 3
+        :columns: 12 12 6 6
 
-        **data preparation & analysis**
+        **data analytics**
         ^^^
         .. toctree::
-            :maxdepth: 2
+            :maxdepth: 3
+
+            Data Analytics <./data_analytics/index.rst>
+
+    .. grid-item-card::
+        :padding: 3
+        :columns: 12 12 6 6
+
+        **data analysis**
+        ^^^
+        .. toctree::
+            :maxdepth: 3
 
             Data Preparation & Analysis <./data_preparation_and_analysis/index.rst>
 
     .. grid-item-card::
         :padding: 3
+        :columns: 12 12 6 6
 
         **bayesian data analysis**
         ^^^
         .. toctree::
-            :maxdepth: 2
+            :maxdepth: 3
 
             Bayesian Data Analysis <./bayesian_data_analysis/index.rst>
 
     .. grid-item-card::
         :padding: 3
+        :columns: 12 12 6 6
 
         **time series**
         ^^^
         .. toctree::
-            :maxdepth: 2
+            :maxdepth: 3
 
             Time Series <./time_series/index.rst>
 
     .. grid-item-card::
         :padding: 3
+        :columns: 12 12 6 6
 
         **deep learning**
         ^^^
         .. toctree::
-            :maxdepth: 2
+            :maxdepth: 3
 
             Deep Learning <./deep_learning/index.rst>
 
     .. grid-item-card::
         :padding: 3
+        :columns: 12 12 6 6
 
         **resources**
         ^^^
@@ -123,11 +140,12 @@ Learn
 
     .. grid-item-card::
         :padding: 3
+        :columns: 12 12 6 6
 
         **cheatsheets**
         ^^^
         .. toctree::
-            :maxdepth: 2
+            :maxdepth: 3
 
             Cheatsheet <./cheatsheet/index.rst>
 

@@ -212,7 +212,8 @@ def main() -> int:
             nav_parts.append(f":doc:`\u25c0 Previous \u00b7 {p} <{docname[p]}>`")
         if i < N_LESSONS:
             nx = inv[pos + 1][0]
-            nav_parts.append(f":doc:`Next \u00b7 {nx} <{docname[nx]}> \u25b6`")
+            nav_parts.append(f":doc:`Next \u00b7 {nx} \u25b6 <{docname[nx]}>`")
+        nav_parts.append(":doc:`\u2191 Section <index>`")
         if nav_parts:
             a("   \u00b7   ".join(nav_parts))
             a("")
@@ -234,17 +235,30 @@ def main() -> int:
             a("   one-line summary above and follow the navigation to adjacent lessons.")
         a("")
 
+        # https://www.sphinx-doc.org/en/master/usage/restructuredtext/directives.html#admonitions-messages-and-warnings
+        # Note      → "Be aware of this clarification or detail."          # 📝 Neutral observations, assumptions, clarifications, conventions, or exceptions.
+        # See also  → "Explore these related topics and resources."        # 📚 Internal/external references, further reading, related topics, prerequisites.
+        # Hint      → "This may help you understand the concept."          # 💡 Intuition, conceptual connections, mind maps, learning aids.
+        # Tip       → "This may help you work more effectively."           # 💡 Best practices, shortcuts, recommendations, efficient/advice workflows.
+        # Info      → "Here's additional background or context."           # ℹ️ Background, implementation notes, **sources used by this page**, supplementary factual information where the information came from.
+        # Important → "Do not overlook this; it's essential."              # ⭐ Critical/Essential concepts, requirements, or limitations.
+
         # lateral cross-links
         if MINDMAP.get(title):
-            a(".. seealso::")
+            a(".. hint::")
             a("")
             links = "  \u00b7  ".join(f":doc:`{n} <{docname[n]}>`" for n in MINDMAP[title])
             a(f"   **Related lessons:** {links}")
             a("")
 
         # source (context/traceability)
-        a(f"**Source** (context, re-expressed in our own words): `{url} <{url}>`__")
+        a(".. seealso::")
         a("")
+        a(f"   **Source article** Adapted (context, re-expressed) in our own words from: `{url} <{url}>`__ "
+          f"(insightful-data-lab.com).")
+        a("")
+
+        # tags
         a(f".. tags:: purpose: reference, topic: deep learning, level: {level}")
         a("")
 
@@ -305,25 +319,79 @@ def main() -> int:
     w(SUB.replace("-", "="))   # a visual transition rule (== line, blank-separated)
     w("")
 
+    # ---- live filter: type-to-search across every term (progressive JS) ----
+    # Static, dependency-free, deterministic. Without JS the page degrades
+    # gracefully to plain collapsible dropdowns.
+    # ---- v2 hub: live filter + collapsed stage dropdowns + A-Z --------
+    # Same pattern/classes as learn/terminology (details.sd-dropdown, .term-az)
+    n_items = len(titles)
+    w(".. raw:: html")
+    w("")
+    w('   <div style="text-align:center;margin:0.4rem 0 0.4rem">')
+    w('   <input id="term-filter" type="search" autocomplete="off" spellcheck="false"')
+    w(f'          placeholder="&#128269;&nbsp; Type to filter {n_items} lessons &mdash; by title or keyword&hellip;"')
+    w('          style="width:100%;max-width:100%;padding:0.55rem 1rem;font-size:1rem;')
+    w('                 border:1px solid var(--pst-color-border,#ccc);border-radius:0.55rem;box-sizing:border-box;')  # 1px solid rgba(128,128,128,0.45)
+    w('                 background:transparent;color:inherit"/>')
+    w('   <div id="term-filter-count" style="opacity:0.65;font-size:0.85rem;')
+    w('        min-height:1.2em;margin-top:0.35rem"></div>')
+    w("   </div>")
+    w("   <script>")
+    w("   document.addEventListener('DOMContentLoaded',function(){")
+    w("     var inp=document.getElementById('term-filter');if(!inp){return;}")
+    w("     var dds=[].slice.call(document.querySelectorAll('details.sd-dropdown'));")
+    w("     var az=document.querySelector('details.term-az');")
+    w("     var items=[];")
+    w("     dds.forEach(function(d){[].slice.call(d.querySelectorAll('li')).forEach(")
+    w("       function(li){items.push({li:li,d:d,t:li.textContent.toLowerCase()});});});")
+    w("     var cnt=document.getElementById('term-filter-count');")
+    w("     inp.addEventListener('input',function(){")
+    w("       var q=inp.value.trim().toLowerCase();var n=0;")
+    w("       dds.forEach(function(d){d.tHits=0;});")
+    w("       items.forEach(function(it){")
+    w("         var hit=!q||it.t.indexOf(q)!==-1;")
+    w("         it.li.style.display=hit?'':'none';")
+    w("         if(hit){it.d.tHits+=1;if(az&&it.d===az){n+=1;}}});")
+    w("       dds.forEach(function(d){")
+    w("         if(q){d.style.display=d.tHits?'':'none';d.open=d.tHits>0;}")
+    w("         else{d.style.display='';d.open=false;}});")
+    w(f"       if(cnt){{cnt.textContent=(q&&az)?(n+' of {n_items} match'+(n===1?'':'s')):'';}}")
+    w("     });")
+    w("   });")
+    w("   </script>")
+    w("")
+
     for stage in STAGE_ORDER:
         emoji, stage_title, level, blurb = STAGES[stage]
         sn = STAGE_ORDER.index(stage) + 1
-        head = f"{emoji} Stage {sn} \u2014 {stage_title}"
-        w(head)
-        w("-" * max(72, len(head) + 2))
+        lessons = by_stage[stage]
+        # stable per-stage anchor (linkable from other hubs)
+        w(f".. _dl-stage-{stage}:")
         w("")
-        w(f"*{blurb}*")
+        w(f".. dropdown:: {emoji} Stage {sn} \u2014 {stage_title}  \u00b7  {len(lessons)} lessons")
+        w("   :animate: fade-in-slide-down")
         w("")
-        w(".. grid:: 1 2 2 2")
-        w("   :gutter: 2")
+        w(f"   *{blurb}*  \u00b7  *{level}*")
         w("")
-        for t in by_stage[stage]:
-            w(f"   .. grid-item-card:: {idx[t]:02d} \u00b7 {t}")
-            w(f"      :link: {anchor[t]}")
-            w("      :link-type: ref")
-            w("")
-            w(f"      {GLOSS[t]}")
-            w("")
+        for t in lessons:
+            w(f"   * :doc:`{idx[t]:02d} \u00b7 {t} <{docname[t]}>` \u2014 {GLOSS[t]}")
+        w("")
+
+    # ---- dictionary view: one A-Z master list (auto-sorted) ----------
+    az_head = "\U0001F524 Every lesson, A\u2013Z"
+    w(az_head)
+    w("-" * (len(az_head) + 2))
+    w("")
+    w(".. dropdown:: Open the full alphabetical index")
+    w("   :animate: fade-in-slide-down")
+    w("   :class-container: term-az")
+    w("")
+    w("   .. hlist::")
+    w("      :columns: 2")
+    w("")
+    for t in sorted(titles, key=str.casefold):
+        w(f"      * :doc:`{t} <{docname[t]}>`")
+    w("")
 
     # hidden ordered toctree so Sphinx builds the sequence + sidebar nav
     w(".. toctree::")
