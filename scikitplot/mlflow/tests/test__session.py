@@ -422,7 +422,6 @@ class TestSessionErrorPaths:
         dummy = _Mlflow()
         _patch_session(monkeypatch, dummy)
         monkeypatch.delenv("_SP_SESS_TEST", raising=False)
-
         cfg = SessionConfig(
             tracking_uri="http://127.0.0.1:5000",
             extra_env={"_SP_SESS_TEST": "1"},
@@ -431,7 +430,7 @@ class TestSessionErrorPaths:
             with session(config=cfg, start_server=False):
                 assert os.environ.get("_SP_SESS_TEST") == "1"
                 raise RuntimeError("boom")
-
+        # assert "_SP_SESS_TEST" not in os.environ
         assert os.environ.get("_SP_SESS_TEST") is None
 
 
