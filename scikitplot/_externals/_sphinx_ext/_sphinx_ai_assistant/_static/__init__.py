@@ -68,6 +68,7 @@ __all__ = [
     "_SVG_KEYBOARD",
     "_SVG_MARKDOWN",
     "_SVG_NEW_CHAT",
+    "_SVG_NEW_CHAT_COMPOSE",
     "_SVG_OLLAMA",
     "_SVG_PRIVACY",
     "_SVG_SEARCH_AI",
@@ -175,6 +176,50 @@ _SVG_NEW_CHAT: str = (
     "d2lkdGg9IjIiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIgc3Ryb2tlLWxpbmVqb2lu"
     "PSJyb3VuZCI+PHBvbHlsaW5lIHBvaW50cz0iMSA0IDEgMTAgNyAxMCIvPjxwYXRo"
     "IGQ9Ik0zLjUxIDE1YTkgOSAwIDEgMCAuNDktNC41Ii8+PC9zdmc+"
+)
+
+# Compose / spark: alternate "Start a new chat" glyph (filled, 16x16 viewBox).
+# Additive and inert — NOT yet wired to the active "new-chat" _ICON_META entry;
+# provided for future usage.  To adopt it, point the "new-chat" entry below
+# (and ICONS.newChat in ai-assistant.js) at this constant instead.
+_SVG_NEW_CHAT_COMPOSE: str = (
+    "data:image/svg+xml;base64,"
+    "PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdC"
+    "b3g9IjAgMCAxNiAxNiIgd2lkdGg9IjE2IiBoZWlnaHQ9IjE2IiBmaWxsPSJu"
+    "b25lIj48cGF0aCBmaWxsPSIjMjQyOTJmIiBkPSJNMTMuNzUgMTBjMC0yLjM4"
+    "OS0uOTgzLTQuMTMxLTEuNjk2LTUuMDgtLjE5LjQzNy0uNzQgMS4zMy0yLjA1"
+    "NCAxLjMzLS43NjUgMC0xLjMtLjMzNC0xLjY0My0uNzEyLS4zMDYtLjMzOC0u"
+    "NDU1LS43MDYtLjUxMy0uOTAybC0uMDEtLjAzN2MtLjA5Ny0uMzYtLjE3Ni0u"
+    "NzM4LS4yNTMtMS4wNzktLjA3OS0uMzUtLjE1OS0uNjc2LS4yNjItLjk4LS4x"
+    "MDgtLjMxOC0uMjQtLjYtLjQxMi0uODQ0LS44NjUgMS44Mi0yLjAwMiAzLjA1"
+    "LTIuODk5IDQuMTUxQzIuOTggNy4xMTEgMi4yNSA4LjIyIDIuMjUgMTBjMCAx"
+    "LjU0NS45MjMgMi45NTUgMi4zNzQgMy44MzEtLjA3NC0uMjc3LS4xMTUtLjU2"
+    "NS0uMTIzLS44NTVsLS4wMDEtLjEwNGMwLS45NTcuNTIyLTEuNzg0IDEuMTA3"
+    "LTIuNDcyLjU4LS42ODUgMS4zNTItMS4zNzEgMS45NTItMS45NjhsLjAyNC0u"
+    "MDIyYy4yNDUtLjIyLjYyMi0uMjEzLjg1OC4wMjIuNjEzLjYxIDEuMzcyIDEu"
+    "MzEgMS45NTYgMi4wMTIuNTc1LjY5MSAxLjEwMyAxLjUyIDEuMTAzIDIuNDI4"
+    "bC0uMDAxLjEwNGMtLjAwOC4yOS0uMDQ5LjU3OC0uMTIzLjg1NSAxLjQ1LS44"
+    "NzYgMi4zNzQtMi4yODYgMi4zNzQtMy44MzFNMTUgMTBjMCAyLjgxNy0yLjI0"
+    "MSA1LjA0Ni01LjAzNiA1Ljc1NmwtLjEzMy4wMzJjLS4yOTcuMDctLjYwMS0u"
+    "MDg1LS43Mi0uMzY2LS4xMTgtLjI4LS4wMTYtLjYwNy4yNDItLjc3bC4wNTMt"
+    "LjAzNWMuNTI4LS4zNjIuODI0LS45NjcuODQzLTEuNjc0bC4wMDEtLjA3YzAt"
+    "LjQ0My0uMjcxLS45NzctLjgxNC0xLjYzLS40MTYtLjUtLjkyLS45OS0xLjQz"
+    "OC0xLjQ5NC0uNTIuNS0xLjAxOS45NjUtMS40MzggMS40Ni0uNTMzLjYyNy0u"
+    "ODEgMS4xNjQtLjgxIDEuNjYzbC4wMDEuMDcxYy4wMi43My4zMzUgMS4zNTMu"
+    "ODk2IDEuNzEuMjU4LjE2My4zNi40ODguMjQxLjc3LS4xMTQuMjcyLS40MDMu"
+    "NDI1LS42OTEuMzcxbC0uMDI4LS4wMDZDMy4zMTMgMTUuMTE2IDEgMTIuODYy"
+    "IDEgMTBjMC0yLjIyLjk1Ny0zLjYxMSAyLjAzOS00Ljk0MUM0LjExOSAzLjcz"
+    "IDUuMzA1IDIuNDczIDYuMTA0LjRsLjAxNC0uMDMzYy4wNzMtLjE2LjIxLS4y"
+    "ODQuMzgtLjMzOC4xODEtLjA1Ny4zNzgtLjAzLjUzNi4wNzZsLjA3NC4wNWMu"
+    "NzU2LjUzMyAxLjE0OCAxLjI2IDEuMzk0IDEuOTgzLjEyNi4zNy4yMTguNzUu"
+    "Mjk5IDEuMTA3LjA4My4zNjguMTUyLjcwMy4yNCAxLjAzbC4wMDguMDI2Yy4w"
+    "MjUuMDc0LjA5Ni4yNDUuMjM1LjM5OC4xNDIuMTU3LjM1Ni4zMDEuNzE2LjMw"
+    "MS4zNCAwIC41MzctLjExMS42Ni0uMjIyLjEzNy0uMTIzLjIxNi0uMjc3LjI2"
+    "LS4zODVsLjAxMi0uMDM2Yy4wMy0uMDk0LjA2My0uMjYzLjEwMS0uNDc4LjAx"
+    "OC0uMS4wNC0uMjIxLjA2My0uMzEyLjAwOS0uMDM1LjAzLS4xMjMuMDc1LS4y"
+    "MDguMDEzLS4wMjYuMDgyLS4xNjUuMjQyLS4yNjMuMDk3LS4wNi4yNC0uMTA5"
+    "LjQwOC0uMDg4LjE0Mi4wMTcuMjQ4LjA3OC4zMTkuMTM1bC4wMjguMDIzLjA0"
+    "OS4wNDZDMTIuNiAzLjU3NSAxNSA1Ljk5NiAxNSAxMCIvPjwvc3ZnPg=="
 )
 
 # Download arrow: "Export AI conversation as txt"
@@ -336,6 +381,7 @@ _ICON_META: dict[str, dict[str, str]] = {
     "copy": {"icon": _SVG_COPY, "desc": "Copy page as Markdown"},
     "markdown": {"icon": _SVG_MARKDOWN, "desc": "View as Markdown"},
     "new-chat": {"icon": _SVG_NEW_CHAT, "desc": "Start a new chat"},
+    "new-chat-compose": {"icon": _SVG_NEW_CHAT_COMPOSE, "desc": "Start a new chat"},
     "export-txt": {"icon": _SVG_EXPORT_TXT, "desc": "Export conversation as txt"},
     "copy-answer": {"icon": _SVG_COPY_ANSWER, "desc": "Copy this answer"},
     "privacy": {"icon": _SVG_PRIVACY, "desc": "Privacy Policy"},

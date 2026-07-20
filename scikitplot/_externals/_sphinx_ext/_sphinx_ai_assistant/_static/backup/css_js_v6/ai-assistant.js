@@ -18,6 +18,13 @@
  * All behaviour driven by window.AI_ASSISTANT_CONFIG injected by the
  * Python extension's add_ai_assistant_context().
  *
+ * Browser baseline
+ * ────────────────
+ *   – Modern browsers (ES2017+): async/await, arrow functions and spread are
+ *     used, so this file does NOT run on IE11 (it would not even parse there).
+ *   – A few IE11-era fallbacks remain (XHR-for-AbortController, ResizeObserver
+ *     guard); they are legacy and no longer reachable — safe to simplify later.
+ *
  * Security
  * ────────
  *   – All user-facing HTML via textContent / setAttribute, never innerHTML.
@@ -29,9 +36,43 @@
  *   – Every public function is at module scope inside the IIFE.
  *   – The global 'click' listener for dropdown-close is registered once only
  *     (guarded by _listenersAttached).
- *   – Turndown 7.1.2 is vendored inline — no CDN request, works everywhere.
+ *   – Turndown 7.1.2 is vendored inline (minified) — no CDN request, works everywhere.
  *   – Speech recognition is lazy-started on first mic click (no permission
  *     prompts until the user explicitly clicks the mic icon).
+ */
+
+/**
+ * ─────────────────────────────────────────────────────────────────────────
+ * MODULE MAP  (two top-level IIFEs; line numbers approximate, drift with edits)
+ * ─────────────────────────────────────────────────────────────────────────
+ * IIFE A — the widget                                       L37 → ~L20305
+ *   Bootstrap / shared utils (guard, config, getStaticPath,
+ *     _fetch, _isSafeUrl, ICONS, haptics, long-press)       L37
+ *   Markdown converter (Turndown vendored inline)            ~L1107
+ *   Toolbar + dropdown (createAIAssistantUI)                ~L1127
+ *     ├─ Copy page / View as Markdown
+ *     ├─ Ask-LLM deep links (ChatGPT / Claude / Gemini)
+ *     ├─ MCP tools
+ *     └─ PDF / Print (createPdfSection, handlePdfExport)    ~L1305
+ *   getStaticPath / convertToMarkdown                       ~L1462 / ~L1647
+ *   _EP endpoint & profile engine (+ compat shim)           ~L2000
+ *   Export records / share sheet / model selection          (mid-file)
+ *   AI panel (createAIPanel / toggleAIPanel)                ~L14361 / ~L15672
+ *   Streaming / SSE                                         (late)
+ *   window.AI_ASSISTANT shared surface + bootstrap          end of IIFE A
+ * IIFE B — model-group observer add-on                      ~L20308 → EOF
+ *
+ * ─────────────────────────────────────────────────────────────────────────
+ * LOAD & INIT ORDER  (verified; see ARCHITECTURE-ai-assistant.md)
+ * ─────────────────────────────────────────────────────────────────────────
+ *   1. inline window.AI_ASSISTANT_CONFIG   (parse-time, injected by the page)
+ *   2. ai-assistant.js                     (this file; Turndown is inline)
+ *   3. IIFE A bootstrap: initAIAssistant → createAIAssistantUI (toolbar)
+ *   4. AI panel built lazily on first toggleAIPanel()
+ *   5. IIFE B observer attaches once the panel body exists
+ *   The script is deferred and runs after parse; the bootstrap is
+ *   readyState-gated, so ordering is guaranteed.
+ * ─────────────────────────────────────────────────────────────────────────
  */
 
 (function () {
@@ -40,6 +81,63 @@
     // Guard against multiple injections
     if (window.SphinxAIAssistantInitialized) return;
     window.SphinxAIAssistantInitialized = true;
+
+    // ── Config accessor ──────────────────────────────────────────────────────
+    // Single source for the page-injected configuration; always returns an
+    // object, so callers can do _cfg().foo without guarding.
+    function _cfg() { return window.AI_ASSISTANT_CONFIG || {}; }
+
+    // ── Diagnostics: single gated, scrubbing logger ──────────────────────────
+    // All console output routes through _log(). Rationale:
+    //   * one place to control verbosity and formatting;
+    //   * error/warn always surface; log/info/debug surface only when debug is
+    //     on (config.debug===true, localStorage 'ai-assistant-debug'='1', or
+    //     ?ai-debug=1) - so production consoles stay quiet;
+    //   * object arguments are scrubbed of credential-like keys before printing,
+    //     so tokens/keys/cookies can never leak to the console (defense in depth;
+    //     feedback payloads are additionally redacted at call sites via
+    //     _redactPayloadForLog).
+    var _AI_DEBUG = (function () {
+        try {
+            if (_cfg().debug === true) return true;
+            if (window.localStorage && localStorage.getItem('ai-assistant-debug') === '1') return true;
+            if (location && /[?&]ai-debug=1(?:&|$)/.test(location.search)) return true;
+        } catch (_e) {}
+        return false;
+    }());
+
+    var _SENSITIVE_KEY = /(?:token|authorization|auth|api[_-]?key|secret|bearer|cookie|password|refresh)/i;
+
+    function _scrubArg(v, depth) {
+        if (v == null || typeof v !== 'object' || v instanceof Error) return v;
+        if (depth > 2) return '[...]';
+        var out, k;
+        if (Object.prototype.toString.call(v) === '[object Array]') {
+            out = [];
+            for (k = 0; k < v.length; k++) { out.push(_scrubArg(v[k], depth + 1)); }
+            return out;
+        }
+        out = {};
+        for (k in v) {
+            if (!Object.prototype.hasOwnProperty.call(v, k)) { continue; }
+            out[k] = _SENSITIVE_KEY.test(k) ? '[redacted]' : _scrubArg(v[k], depth + 1);
+        }
+        return out;
+    }
+
+    /**
+     * Gated, scrubbing logger; replaces direct console.* calls. Never throws.
+     * @param {string} level  'error' | 'warn' | 'log' | 'info' | 'debug'
+     */
+    function _log(level) {
+        if (!_AI_DEBUG && level !== 'error' && level !== 'warn') { return; }
+        if (typeof console === 'undefined') { return; }
+        var fn = (typeof console[level] === 'function') ? console[level] : console.log;
+        if (typeof fn !== 'function') { return; }
+        var args = [], i;
+        for (i = 1; i < arguments.length; i++) { args.push(_scrubArg(arguments[i], 0)); }
+        try { fn.apply(console, args); } catch (_e) {}
+    }
 
     // ── Module-level singletons ───────────────────────────────────────────────
 
@@ -423,7 +521,7 @@
 
     /**
      * Feature-flag defaults — last line of defence when the injected
-     * window.AI_ASSISTANT_CONFIG.features dict is missing/partial.
+     * _cfg().features dict is missing/partial.
      *
      * CRITICAL — SINGLE SOURCE OF TRUTH CONTRACT
      * ──────────────────────────────────────────
@@ -471,6 +569,10 @@
         chat:     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/><circle cx="9" cy="11" r="0.8" fill="currentColor" stroke="none"/><circle cx="12" cy="11" r="0.8" fill="currentColor" stroke="none"/><circle cx="15" cy="11" r="0.8" fill="currentColor" stroke="none"/></svg>',
         // ── v0.3 additions — mirror _ICON_META in _static/__init__.py ──────────
         newChat:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 .49-4.5"/></svg>',
+        // Compose / spark variant of "new chat" — additive, inert, for future usage.
+        // Filled 16x16 glyph; inline SVG inherits currentColor (dark-mode safe).
+        // Mirror of new-chat-compose.svg / _SVG_NEW_CHAT_COMPOSE in _static/__init__.py.
+        newChatCompose: '<svg viewBox="0 0 16 16" fill="none"><path fill="currentColor" d="M13.75 10c0-2.389-.983-4.131-1.696-5.08-.19.437-.74 1.33-2.054 1.33-.765 0-1.3-.334-1.643-.712-.306-.338-.455-.706-.513-.902l-.01-.037c-.097-.36-.176-.738-.253-1.079-.079-.35-.159-.676-.262-.98-.108-.318-.24-.6-.412-.844-.865 1.82-2.002 3.05-2.899 4.151C2.98 7.111 2.25 8.22 2.25 10c0 1.545.923 2.955 2.374 3.831-.074-.277-.115-.565-.123-.855l-.001-.104c0-.957.522-1.784 1.107-2.472.58-.685 1.352-1.371 1.952-1.968l.024-.022c.245-.22.622-.213.858.022.613.61 1.372 1.31 1.956 2.012.575.691 1.103 1.52 1.103 2.428l-.001.104c-.008.29-.049.578-.123.855 1.45-.876 2.374-2.286 2.374-3.831M15 10c0 2.817-2.241 5.046-5.036 5.756l-.133.032c-.297.07-.601-.085-.72-.366-.118-.28-.016-.607.242-.77l.053-.035c.528-.362.824-.967.843-1.674l.001-.07c0-.443-.271-.977-.814-1.63-.416-.5-.92-.99-1.438-1.494-.52.5-1.019.965-1.438 1.46-.533.627-.81 1.164-.81 1.663l.001.071c.02.73.335 1.353.896 1.71.258.163.36.488.241.77-.114.272-.403.425-.691.371l-.028-.006C3.313 15.116 1 12.862 1 10c0-2.22.957-3.611 2.039-4.941C4.119 3.73 5.305 2.473 6.104.4l.014-.033c.073-.16.21-.284.38-.338.181-.057.378-.03.536.076l.074.05c.756.533 1.148 1.26 1.394 1.983.126.37.218.75.299 1.107.083.368.152.703.24 1.03l.008.026c.025.074.096.245.235.398.142.157.356.301.716.301.34 0 .537-.111.66-.222.137-.123.216-.277.26-.385l.012-.036c.03-.094.063-.263.101-.478.018-.1.04-.221.063-.312.009-.035.03-.123.075-.208.013-.026.082-.165.242-.263.097-.06.24-.109.408-.088.142.017.248.078.319.135l.028.023.049.046C12.6 3.575 15 5.996 15 10"/></svg>',
         exportTxt:'<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>',
         copyAns:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>',
         privacy:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
@@ -558,7 +660,7 @@
      */
     function _providerColor(provider) {
         if (!provider) return '';
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var merged = Object.assign({}, _PROVIDER_COLORS_JS, cfg.providerColors || {});
         return merged[provider] || '';
     }
@@ -1085,56 +1187,28 @@
     //   Vendoring eliminates every one of those failure modes at once because
     //   there is simply no network request to block.
     //
-    // SCOPE:  Declared as a local `var` inside this IIFE — does NOT write to
-    //   window.TurndownService in the page's global scope.  If the host page
-    //   also loads Turndown independently the two are fully isolated.
+    // SCOPE:  Declared as a local `var` inside this IIFE - does not write to
+    //   window.TurndownService, so it cannot collide with a host page that also
+    //   loads Turndown. Inline + same-origin means no network request at all:
+    //   Markdown export works offline and behind content blockers.
     //
-    // UPGRADING:  When bumping the Turndown version, replace the single
-    //   `var TurndownService = …` assignment below.  Generate the new content
-    //   with:
+    // UPGRADING:  Regenerate the minified body below with:
     //     npm install turndown@<new-version>
-    //     npx terser node_modules/turndown/dist/turndown.js \
-    //       --compress --mangle --output turndown.vendor.min.js
-    //   Then paste the file content here and update the version tag.
+    //     npx terser node_modules/turndown/dist/turndown.js --compress --mangle
+    //   and paste it after `var TurndownService=`, keeping the MIT attribution.
     //
-    // SOURCE:  turndown@7.1.2 dist/turndown.js
-    //          Minified with terser --compress --mangle
-    //
-    // LICENSE (MIT — Copyright © Dom Christie):
-    //   Permission is hereby granted, free of charge, to any person obtaining
-    //   a copy of this software and associated documentation files (the
-    //   "Software"), to deal in the Software without restriction, including
-    //   without limitation the rights to use, copy, modify, merge, publish,
-    //   distribute, sublicense, and/or sell copies of the Software, and to
-    //   permit persons to whom the Software is furnished to do so, subject to
-    //   the following conditions: The above copyright notice and this
-    //   permission notice shall be included in all copies or substantial
-    //   portions of the Software.
-    //   Full text: https://github.com/domchristie/turndown/blob/master/LICENSE
-    // ─────────────────────────────────────────────────────────────────────────
+    // CodeQL: the alerts on the minified line below (unreachable-statement, ASI,
+    //   use-before-declaration, useless-assignment) are inherent to minified
+    //   third-party output; they are suppressed, not "fixed" - the vendored
+    //   library must never be hand-edited. If your CodeQL pack ignores the inline
+    //   suppression, dismiss those 6 alerts in the UI as third-party.
+    // ---------------------------------------------------------------------------
     /* eslint-disable */
-    // turndown@7.1.2 — MIT — begin vendor
+    // turndown@7.1.2 - MIT (Dom Christie) - https://github.com/domchristie/turndown - begin vendor
+    // codeql[js/unreachable-statement, js/automatic-semicolon-insertion, js/variable-use-before-declaration, js/useless-assignment-to-local]
     var TurndownService=function(){"use strict";function e(e,n){return Array(n+1).join(e)}var n=["ADDRESS","ARTICLE","ASIDE","AUDIO","BLOCKQUOTE","BODY","CANVAS","CENTER","DD","DIR","DIV","DL","DT","FIELDSET","FIGCAPTION","FIGURE","FOOTER","FORM","FRAMESET","H1","H2","H3","H4","H5","H6","HEADER","HGROUP","HR","HTML","ISINDEX","LI","MAIN","MENU","NAV","NOFRAMES","NOSCRIPT","OL","OUTPUT","P","PRE","SECTION","TABLE","TBODY","TD","TFOOT","TH","THEAD","TR","UL"];function t(e){return a(e,n)}var r=["AREA","BASE","BR","COL","COMMAND","EMBED","HR","IMG","INPUT","KEYGEN","LINK","META","PARAM","SOURCE","TRACK","WBR"];function i(e){return a(e,r)}var o=["A","TABLE","THEAD","TBODY","TFOOT","TH","TD","IFRAME","SCRIPT","AUDIO","VIDEO"];function a(e,n){return n.indexOf(e.nodeName)>=0}function l(e,n){return e.getElementsByTagName&&n.some(function(n){return e.getElementsByTagName(n).length})}var u={};function c(e){return e?e.replace(/(\n+\s*)+/g,"\n"):""}function s(e){for(var n in this.options=e,this._keep=[],this._remove=[],this.blankRule={replacement:e.blankReplacement},this.keepReplacement=e.keepReplacement,this.defaultRule={replacement:e.defaultReplacement},this.array=[],e.rules)this.array.push(e.rules[n])}function f(e,n,t){for(var r=0;r<e.length;r++){var i=e[r];if(d(i,n,t))return i}}function d(e,n,t){var r=e.filter;if("string"==typeof r){if(r===n.nodeName.toLowerCase())return!0}else if(Array.isArray(r)){if(r.indexOf(n.nodeName.toLowerCase())>-1)return!0}else{if("function"!=typeof r)throw new TypeError("`filter` needs to be a string, array, or function");if(r.call(e,n,t))return!0}}function p(e){var n=e.nextSibling||e.parentNode;return e.parentNode.removeChild(e),n}function h(e,n,t){return e&&e.parentNode===n||t(n)?n.nextSibling||n.parentNode:n.firstChild||n.nextSibling||n.parentNode}u.paragraph={filter:"p",replacement:function(e){return"\n\n"+e+"\n\n"}},u.lineBreak={filter:"br",replacement:function(e,n,t){return t.br+"\n"}},u.heading={filter:["h1","h2","h3","h4","h5","h6"],replacement:function(n,t,r){var i=Number(t.nodeName.charAt(1));return"setext"===r.headingStyle&&i<3?"\n\n"+n+"\n"+e(1===i?"=":"-",n.length)+"\n\n":"\n\n"+e("#",i)+" "+n+"\n\n"}},u.blockquote={filter:"blockquote",replacement:function(e){return"\n\n"+(e=(e=e.replace(/^\n+|\n+$/g,"")).replace(/^/gm,"> "))+"\n\n"}},u.list={filter:["ul","ol"],replacement:function(e,n){var t=n.parentNode;return"LI"===t.nodeName&&t.lastElementChild===n?"\n"+e:"\n\n"+e+"\n\n"}},u.listItem={filter:"li",replacement:function(e,n,t){e=e.replace(/^\n+/,"").replace(/\n+$/,"\n").replace(/\n/gm,"\n    ");var r=t.bulletListMarker+"   ",i=n.parentNode;if("OL"===i.nodeName){var o=i.getAttribute("start"),a=Array.prototype.indexOf.call(i.children,n);r=(o?Number(o)+a:a+1)+".  "}return r+e+(n.nextSibling&&!/\n$/.test(e)?"\n":"")}},u.indentedCodeBlock={filter:function(e,n){return"indented"===n.codeBlockStyle&&"PRE"===e.nodeName&&e.firstChild&&"CODE"===e.firstChild.nodeName},replacement:function(e,n,t){return"\n\n    "+n.firstChild.textContent.replace(/\n/g,"\n    ")+"\n\n"}},u.fencedCodeBlock={filter:function(e,n){return"fenced"===n.codeBlockStyle&&"PRE"===e.nodeName&&e.firstChild&&"CODE"===e.firstChild.nodeName},replacement:function(n,t,r){for(var i,o=((t.firstChild.getAttribute("class")||"").match(/language-(\S+)/)||[null,""])[1],a=t.firstChild.textContent,l=r.fence.charAt(0),u=3,c=new RegExp("^"+l+"{3,}","gm");i=c.exec(a);)i[0].length>=u&&(u=i[0].length+1);var s=e(l,u);return"\n\n"+s+o+"\n"+a.replace(/\n$/,"")+"\n"+s+"\n\n"}},u.horizontalRule={filter:"hr",replacement:function(e,n,t){return"\n\n"+t.hr+"\n\n"}},u.inlineLink={filter:function(e,n){return"inlined"===n.linkStyle&&"A"===e.nodeName&&e.getAttribute("href")},replacement:function(e,n){var t=n.getAttribute("href"),r=c(n.getAttribute("title"));return r&&(r=' "'+r+'"'),"["+e+"]("+t+r+")"}},u.referenceLink={filter:function(e,n){return"referenced"===n.linkStyle&&"A"===e.nodeName&&e.getAttribute("href")},replacement:function(e,n,t){var r,i,o=n.getAttribute("href"),a=c(n.getAttribute("title"));switch(a&&(a=' "'+a+'"'),t.linkReferenceStyle){case"collapsed":r="["+e+"][]",i="["+e+"]: "+o+a;break;case"shortcut":r="["+e+"]",i="["+e+"]: "+o+a;break;default:var l=this.references.length+1;r="["+e+"]["+l+"]",i="["+l+"]: "+o+a}return this.references.push(i),r},references:[],append:function(e){var n="";return this.references.length&&(n="\n\n"+this.references.join("\n")+"\n\n",this.references=[]),n}},u.emphasis={filter:["em","i"],replacement:function(e,n,t){return e.trim()?t.emDelimiter+e+t.emDelimiter:""}},u.strong={filter:["strong","b"],replacement:function(e,n,t){return e.trim()?t.strongDelimiter+e+t.strongDelimiter:""}},u.code={filter:function(e){var n=e.previousSibling||e.nextSibling,t="PRE"===e.parentNode.nodeName&&!n;return"CODE"===e.nodeName&&!t},replacement:function(e){if(!e)return"";e=e.replace(/\r?\n|\r/g," ");for(var n=/^`|^ .*?[^ ].* $|`$/.test(e)?" ":"",t="`",r=e.match(/`+/gm)||[];-1!==r.indexOf(t);)t+="`";return t+n+e+n+t}},u.image={filter:"img",replacement:function(e,n){var t=c(n.getAttribute("alt")),r=n.getAttribute("src")||"",i=c(n.getAttribute("title"));return r?"!["+t+"]("+r+(i?' "'+i+'"':"")+")":""}},s.prototype={add:function(e,n){this.array.unshift(n)},keep:function(e){this._keep.unshift({filter:e,replacement:this.keepReplacement})},remove:function(e){this._remove.unshift({filter:e,replacement:function(){return""}})},forNode:function(e){return e.isBlank?this.blankRule:(n=f(this.array,e,this.options))||(n=f(this._keep,e,this.options))||(n=f(this._remove,e,this.options))?n:this.defaultRule;var n},forEach:function(e){for(var n=0;n<this.array.length;n++)e(this.array[n],n)}};var g="undefined"!=typeof window?window:{};var m,v,A=function(){var e=g.DOMParser,n=!1;try{(new e).parseFromString("","text/html")&&(n=!0)}catch(e){}return n}()?g.DOMParser:(m=function(){},function(){var e=!1;try{document.implementation.createHTMLDocument("").open()}catch(n){window.ActiveXObject&&(e=!0)}return e}()?m.prototype.parseFromString=function(e){var n=new window.ActiveXObject("htmlfile");return n.designMode="on",n.open(),n.write(e),n.close(),n}:m.prototype.parseFromString=function(e){var n=document.implementation.createHTMLDocument("");return n.open(),n.write(e),n.close(),n},m);function y(e,n){var r;"string"==typeof e?r=(v=v||new A).parseFromString('<x-turndown id="turndown-root">'+e+"</x-turndown>","text/html").getElementById("turndown-root"):r=e.cloneNode(!0);return function(e){var n=e.element,t=e.isBlock,r=e.isVoid,i=e.isPre||function(e){return"PRE"===e.nodeName};if(n.firstChild&&!i(n)){for(var o=null,a=!1,l=null,u=h(l,n,i);u!==n;){if(3===u.nodeType||4===u.nodeType){var c=u.data.replace(/[ \r\n\t]+/g," ");if(o&&!/ $/.test(o.data)||a||" "!==c[0]||(c=c.substr(1)),!c){u=p(u);continue}u.data=c,o=u}else{if(1!==u.nodeType){u=p(u);continue}t(u)||"BR"===u.nodeName?(o&&(o.data=o.data.replace(/ $/,"")),o=null,a=!1):r(u)||i(u)?(o=null,a=!0):o&&(a=!1)}var s=h(l,u,i);l=u,u=s}o&&(o.data=o.data.replace(/ $/,""),o.data||p(o))}}({element:r,isBlock:t,isVoid:i,isPre:n.preformattedCode?N:null}),r}function N(e){return"PRE"===e.nodeName||"CODE"===e.nodeName}function E(e,n){return e.isBlock=t(e),e.isCode="CODE"===e.nodeName||e.parentNode.isCode,e.isBlank=function(e){return!i(e)&&!function(e){return a(e,o)}(e)&&/^\s*$/i.test(e.textContent)&&!function(e){return l(e,r)}(e)&&!function(e){return l(e,o)}(e)}(e),e.flankingWhitespace=function(e,n){if(e.isBlock||n.preformattedCode&&e.isCode)return{leading:"",trailing:""};var t=(r=e.textContent,i=r.match(/^(([ \t\r\n]*)(\s*))(?:(?=\S)[\s\S]*\S)?((\s*?)([ \t\r\n]*))$/),{leading:i[1],leadingAscii:i[2],leadingNonAscii:i[3],trailing:i[4],trailingNonAscii:i[5],trailingAscii:i[6]});var r,i;t.leadingAscii&&T("left",e,n)&&(t.leading=t.leadingNonAscii);t.trailingAscii&&T("right",e,n)&&(t.trailing=t.trailingNonAscii);return{leading:t.leading,trailing:t.trailing}}(e,n),e}function T(e,n,r){var i,o,a;return"left"===e?(i=n.previousSibling,o=/ $/):(i=n.nextSibling,o=/^ /),i&&(3===i.nodeType?a=o.test(i.nodeValue):r.preformattedCode&&"CODE"===i.nodeName?a=!1:1!==i.nodeType||t(i)||(a=o.test(i.textContent))),a}var R=Array.prototype.reduce,C=[[/\\/g,"\\\\"],[/\*/g,"\\*"],[/^-/g,"\\-"],[/^\+ /g,"\\+ "],[/^(=+)/g,"\\$1"],[/^(#{1,6}) /g,"\\$1 "],[/`/g,"\\`"],[/^~~~/g,"\\~~~"],[/\[/g,"\\["],[/\]/g,"\\]"],[/^>/g,"\\>"],[/_/g,"\\_"],[/^(\d+)\. /g,"$1\\. "]];function k(e){if(!(this instanceof k))return new k(e);var n={rules:u,headingStyle:"setext",hr:"* * *",bulletListMarker:"*",codeBlockStyle:"indented",fence:"```",emDelimiter:"_",strongDelimiter:"**",linkStyle:"inlined",linkReferenceStyle:"full",br:"  ",preformattedCode:!1,blankReplacement:function(e,n){return n.isBlock?"\n\n":""},keepReplacement:function(e,n){return n.isBlock?"\n\n"+n.outerHTML+"\n\n":n.outerHTML},defaultReplacement:function(e,n){return n.isBlock?"\n\n"+e+"\n\n":e}};this.options=function(e){for(var n=1;n<arguments.length;n++){var t=arguments[n];for(var r in t)t.hasOwnProperty(r)&&(e[r]=t[r])}return e}({},n,e),this.rules=new s(this.options)}function b(e){var n=this;return R.call(e.childNodes,function(e,t){var r="";return 3===(t=new E(t,n.options)).nodeType?r=t.isCode?t.nodeValue:n.escape(t.nodeValue):1===t.nodeType&&(r=D.call(n,t)),S(e,r)},"")}function O(e){var n=this;return this.rules.forEach(function(t){"function"==typeof t.append&&(e=S(e,t.append(n.options)))}),e.replace(/^[\t\r\n]+/,"").replace(/[\t\r\n\s]+$/,"")}function D(e){var n=this.rules.forNode(e),t=b.call(this,e),r=e.flankingWhitespace;return(r.leading||r.trailing)&&(t=t.trim()),r.leading+n.replacement(t,e,this.options)+r.trailing}function S(e,n){var t=function(e){for(var n=e.length;n>0&&"\n"===e[n-1];)n--;return e.substring(0,n)}(e),r=n.replace(/^\n*/,""),i=Math.max(e.length-t.length,n.length-r.length);return t+"\n\n".substring(0,i)+r}return k.prototype={turndown:function(e){if(!function(e){return null!=e&&("string"==typeof e||e.nodeType&&(1===e.nodeType||9===e.nodeType||11===e.nodeType))}(e))throw new TypeError(e+" is not a string, or an element/document/fragment node.");if(""===e)return"";var n=b.call(this,new y(e,this.options));return O.call(this,n)},use:function(e){if(Array.isArray(e))for(var n=0;n<e.length;n++)this.use(e[n]);else{if("function"!=typeof e)throw new TypeError("plugin must be a Function or an Array of Functions");e(this)}return this},addRule:function(e,n){return this.rules.add(e,n),this},keep:function(e){return this.rules.keep(e),this},remove:function(e){return this.rules.remove(e),this},escape:function(e){return C.reduce(function(e,n){return e.replace(n[0],n[1])},e)}},k}();
-    // turndown@7.1.2 — MIT — end vendor
+    // turndown@7.1.2 - end vendor
     /* eslint-enable */
-
-    /**
-     * Compatibility shim — previously performed async CDN loading of Turndown.
-     *
-     * TurndownService is now vendored inline (see block above) and is always
-     * synchronously available.  This function is retained so any call-site
-     * that passes a callback continues to work without modification; the
-     * callback is invoked synchronously on the same call stack.
-     *
-     * Developer note: do NOT restore CDN loading here.  The inline vendor is
-     * the correct long-term approach; it eliminates the entire class of
-     * iOS-Safari / ad-blocker / offline failures that motivated this change.
-     *
-     * @param {function(): void} callback  Called immediately.
-     */
-    function loadTurndown(callback) {
-        callback();
-    }
 
     /**
      * Bootstrap entry point — called by DOMContentLoaded (or immediately if
@@ -1160,13 +1234,13 @@
         container.appendChild(button);
         container.appendChild(dropdown);
 
-        var position = (window.AI_ASSISTANT_CONFIG && window.AI_ASSISTANT_CONFIG.position) || 'sidebar';
+        var position = (_cfg().position) || 'sidebar';
         insertContainer(container, position);
         setupEventListeners(button, dropdown);
 
         // v0.3: only wire panel-dependent extras when the AI panel feature
         // is actually enabled (respects the FEATURE_DEFAULTS contract).
-        var cfg      = window.AI_ASSISTANT_CONFIG || {};
+        var cfg      = _cfg();
         var features = Object.assign({}, FEATURE_DEFAULTS, cfg.features || {});
         if (features.ai_panel) {
             _bindShortcut();    // R7 — no-op if disabled/invalid in config
@@ -1258,7 +1332,7 @@
         dropdown.setAttribute('role', 'menu');
         // dropdown.style.display = 'none';
 
-        var cfg        = window.AI_ASSISTANT_CONFIG || {};
+        var cfg        = _cfg();
         var features   = Object.assign({}, FEATURE_DEFAULTS, cfg.features || {});
         var staticPath = getStaticPath();
         var hasItems   = false;
@@ -1426,14 +1500,14 @@
         var urlBtn   = document.getElementById('ai-assistant-pdf-mode-url');
         var printBtn = document.getElementById('ai-assistant-pdf-mode-print');
         var descEl   = document.getElementById('ai-assistant-pdf-desc');
-        var pdfUrl   = ((window.AI_ASSISTANT_CONFIG || {}).pdfExportUrl || '').trim();
+        var pdfUrl   = (_cfg().pdfExportUrl || '').trim();
         if (urlBtn)   urlBtn.classList.toggle('active',   mode === 'url');
         if (printBtn) printBtn.classList.toggle('active', mode === 'print');
         if (descEl)   descEl.textContent = _pdfModeDescription(mode, pdfUrl);
     }
 
     function _getPdfMode() {
-        var pdfUrl = ((window.AI_ASSISTANT_CONFIG || {}).pdfExportUrl || '').trim();
+        var pdfUrl = (_cfg().pdfExportUrl || '').trim();
         try {
             var saved = sessionStorage.getItem(_PDF_MODE_KEY);
             if (saved === 'url' || saved === 'print') return saved;
@@ -1487,7 +1561,14 @@
 
     // ── Static path detection ─────────────────────────────────────────────────
 
+    // C2: getStaticPath is deterministic after load (its inputs do not change),
+    // so memoize the first result to avoid repeated string scans on each call.
+    var _staticPathCache = null;
     function getStaticPath() {
+        if (_staticPathCache === null) { _staticPathCache = _computeStaticPath(); }
+        return _staticPathCache;
+    }
+    function _computeStaticPath() {
         if (_selfSrc && _selfSrc.indexOf('_static') !== -1) {
             return _selfSrc.substring(0, _selfSrc.indexOf('_static') + 7);
         }
@@ -1518,12 +1599,12 @@
             for (var k = 0; k < sidebarSelectors.length; k++) {
                 var sidebar = document.querySelector(sidebarSelectors[k]);
                 if (sidebar) {
-                    console.debug('AI Assistant: Inserting into sidebar:', sidebarSelectors[k]);
+                    _log('debug', 'AI Assistant: Inserting into sidebar:', sidebarSelectors[k]);
                     sidebar.insertBefore(container, sidebar.firstChild);
                     return;
                 }
             }
-            console.debug('AI Assistant: No sidebar found, falling back to title position');
+            _log('debug', 'AI Assistant: No sidebar found, falling back to title position');
             insertInTitlePosition(container);
             return;
         }
@@ -1673,7 +1754,7 @@
     // ── Markdown conversion ───────────────────────────────────────────────────
 
     function convertToMarkdown() {
-        var contentSelector = (window.AI_ASSISTANT_CONFIG && window.AI_ASSISTANT_CONFIG.content_selector) || 'article';
+        var contentSelector = (_cfg().content_selector) || 'article';
         var content = document.querySelector(contentSelector);
 
         if (!content) return Promise.reject(new Error('Could not find page content (selector: ' + contentSelector + ')'));
@@ -1720,7 +1801,7 @@
                 closeDropdown();
             })
             .catch(function (err) {
-                console.error('AI Assistant: Failed to convert to Markdown:', err);
+                _log('error', 'AI Assistant: Failed to convert to Markdown:', err);
                 showNotification('Failed to convert page to Markdown.', true);
             });
     }
@@ -1732,7 +1813,7 @@
 
     function handleAIChat(providerKey) {
         try {
-            var providers = ((window.AI_ASSISTANT_CONFIG || {}).providers) || {};
+            var providers = (_cfg().providers) || {};
             var provider  = providers[providerKey];
             if (!provider) { showNotification('AI provider "' + providerKey + '" not configured.', true); return; }
 
@@ -1748,7 +1829,7 @@
             // Only http:// and https:// are safe to window.open; anything else
             // (javascript:, data:, blob:, vbscript:, …) must be rejected.
             if (!/^https?:\/\//i.test(aiUrl)) {
-                console.error('AI Assistant: Blocked unsafe URL scheme in provider "' + providerKey + '":', aiUrl.slice(0, 50));
+                _log('error', 'AI Assistant: Blocked unsafe URL scheme in provider "' + providerKey + '":', aiUrl.slice(0, 50));
                 showNotification('AI provider URL is not a valid HTTP(S) address.', true);
                 return;
             }
@@ -1756,14 +1837,14 @@
             window.open(aiUrl, '_blank', 'noopener,noreferrer');
             closeDropdown();
         } catch (err) {
-            console.error('AI Assistant: Failed to open AI chat:', err);
+            _log('error', 'AI Assistant: Failed to open AI chat:', err);
             showNotification('Failed to open AI chat. Please try again.', true);
         }
     }
 
     function handleMCPInstall(toolKey) {
         try {
-            var mcpTools = ((window.AI_ASSISTANT_CONFIG || {}).mcp_tools) || {};
+            var mcpTools = (_cfg().mcp_tools) || {};
             var tool     = mcpTools[toolKey];
             if (!tool)   { showNotification('MCP tool configuration not found.', true); return; }
 
@@ -1777,7 +1858,7 @@
                     return;
                 }
                 if (!/^(?:mcpb|https):\/\//i.test(mcpbUrl)) {
-                    console.error('AI Assistant: Blocked unsafe mcpb_url scheme for tool "' + toolKey + '":', mcpbUrl.slice(0, 60));
+                    _log('error', 'AI Assistant: Blocked unsafe mcpb_url scheme for tool "' + toolKey + '":', mcpbUrl.slice(0, 60));
                     showNotification('MCP tool download URL must use mcpb:// or https://.', true);
                     return;
                 }
@@ -1819,21 +1900,69 @@
                 return;
             }
 
-            console.warn('AI Assistant: Unknown MCP tool type:', tool.type);
+            _log('warn', 'AI Assistant: Unknown MCP tool type:', tool.type);
             showNotification('Unknown MCP tool type: ' + tool.type, true);
         } catch (err) {
-            console.error('AI Assistant: Failed to install MCP tool:', err);
+            _log('error', 'AI Assistant: Failed to install MCP tool:', err);
             showNotification('Failed to install MCP tool. Please try again.', true);
         }
     }
 
     function handlePdfExport() {
-        var cfg    = window.AI_ASSISTANT_CONFIG || {};
+        var cfg    = _cfg();
         var pdfUrl = (cfg.pdfExportUrl || '').trim();
         var mode   = _getPdfMode();
         closeDropdown();
-        if (mode === 'url' && pdfUrl) window.open(pdfUrl, '_blank', 'noopener,noreferrer');
-        else window.print();
+        if (mode === 'url' && pdfUrl) {
+            window.open(pdfUrl, '_blank', 'noopener,noreferrer');
+            return;
+        }
+        _printWithHeader();
+    }
+
+    /**
+     * Print via the browser's "Save as PDF" dialog after injecting a print-only
+     * header (page title, URL, date) that ai-assistant-print.css reveals. The
+     * header is removed after printing; screen rendering is untouched. All
+     * values are the page's own (document.title / location), written via
+     * textContent — no untrusted data, no innerHTML.
+     *
+     * Reliability: cleanup runs on the 'afterprint' event AND a timeout fallback
+     * (older Safari lacks 'afterprint'), and is idempotent. Requires
+     * ai-assistant-print.css for the pretty output; degrades to a plain print
+     * (no header) if that stylesheet is absent.
+     */
+    function _printWithHeader() {
+        var contentSel = (_cfg().content_selector) || 'article';
+        var mount = document.querySelector(contentSel) || document.body;
+        if (!mount) { try { window.print(); } catch (_e) {} return; }
+
+        var header = document.createElement('div');
+        header.className = 'ai-assistant-print-header';
+        header.style.display = 'none';   // shown only in print, via the stylesheet
+        var title = document.createElement('div');
+        title.className = 'ai-pph-title';
+        title.textContent = document.title || '';
+        var meta = document.createElement('div');
+        meta.className = 'ai-pph-meta';
+        var url = '';
+        try { url = location.href; } catch (_e) {}
+        meta.textContent = url + '  ·  ' + new Date().toISOString().slice(0, 10);
+        header.appendChild(title);
+        header.appendChild(meta);
+        mount.insertBefore(header, mount.firstChild);
+
+        var cleaned = false;
+        var cleanup = function () {
+            if (cleaned) { return; }
+            cleaned = true;
+            if (header && header.parentNode) { header.parentNode.removeChild(header); }
+            if (window.removeEventListener) { window.removeEventListener('afterprint', cleanup); }
+        };
+        if (window.addEventListener) { window.addEventListener('afterprint', cleanup); }
+        setTimeout(cleanup, 2000);
+
+        try { window.print(); } catch (_e) { cleanup(); }
     }
 
     // ── Clipboard ─────────────────────────────────────────────────────────────
@@ -1845,7 +1974,7 @@
                     showInlineConfirmation ? showInlineSuccessState() : showNotification('Markdown copied to clipboard!');
                 })
                 .catch(function (err) {
-                    console.error('AI Assistant: Clipboard API failed:', err);
+                    _log('error', 'AI Assistant: Clipboard API failed:', err);
                     fallbackCopy(text, showInlineConfirmation);
                 });
         } else {
@@ -1882,7 +2011,7 @@
             document.execCommand('copy');
             showInlineConfirmation ? showInlineSuccessState() : showNotification('Markdown copied to clipboard!');
         } catch (err) {
-            console.error('AI Assistant: Fallback copy failed:', err);
+            _log('error', 'AI Assistant: Fallback copy failed:', err);
             showNotification('Failed to copy to clipboard.', true);
         }
         document.body.removeChild(textarea);
@@ -2581,34 +2710,16 @@
         };
     }());
 
-// PART A — _EP Compatibility Shim
-// INSERT after the closing }()); of the _EP IIFE
 // =============================================================================
-
-// =============================================================================
-// _EP Compatibility Shim  (bridges existing IIFE → patch_ep_v2_1 API surface)
+// _EP Compatibility Shim - bridges the _EP IIFE to the full profile API surface
 // =============================================================================
 //
-// HOW TO APPLY
-// ------------
-// File: _static/ai-assistant.js
+// Some callers use profile methods that older _EP IIFE variants did not define.
+// This shim provides them by delegating to the methods that ARE present
+// (addProfile, removeProfile, countCustom, etc.).
 //
-// Find the closing line of the _EP IIFE — it looks like:
-//     }());
-// immediately followed by a blank line and then:
-//     // ── Subbar helpers  (or similar section comment)
-//
-// Insert this entire block AFTER that }()); line.
-//
-// WHY THIS IS NEEDED
-// ------------------
-// patch_ep_v2_2_build_sheet_combined.js calls 15+ methods that were added in
-// patch_ep_v2_1_ep_iife_combined.js.  If you have an earlier _EP IIFE variant
-// that lacks those methods, this shim provides them by delegating to the
-// methods that ARE present (addProfile, removeProfile, countCustom, etc.).
-//
-// The shim is fully idempotent: it checks for each method before adding it,
-// so it is safe to apply even when patch_ep_v2_1 is later applied on top.
+// Idempotent by construction: each method is added only if absent, so the shim
+// is safe even when a newer _EP IIFE already defines these methods.
 //
 // PUBLIC API ADDED
 // ----------------
@@ -2630,9 +2741,8 @@
 //   _EP.MAX_CUSTOM                       → 20 (or MAX_CUSTOM_PROFILES)
 // =============================================================================
 
-    /* jshint esversion:5 */
-    if (typeof _EP !== 'undefined' && _EP &&
-            typeof _EP.resolve === 'function' &&
+    /* jshint esversion:8 */   /* async/await used below (ES2017); not ES5 */
+    if (typeof _EP.resolve === 'function' &&
             typeof _EP.addCustomProfile !== 'function') {
 
         (function (_ep) {
@@ -3256,7 +3366,7 @@
         try {
             payload = JSON.stringify(body);
         } catch (e) {
-            console.warn('[ai-assistant] _remotePost: serialisation failed', e);
+            _log('warn', '[ai-assistant] _remotePost: serialisation failed', e);
             return;
         }
         try {
@@ -3269,19 +3379,19 @@
                 if (r.ok && typeof opts.onSuccess === 'function') {
                     r.json().then(opts.onSuccess).catch(function () {});
                 } else if (!r.ok) {
-                    console.warn('[ai-assistant] _remotePost HTTP', r.status, url);
+                    _log('warn', '[ai-assistant] _remotePost HTTP', r.status, url);
                     if (typeof opts.onError === 'function') {
                         opts.onError({ status: r.status, message: r.statusText });
                     }
                 }
             }).catch(function (e) {
-                console.warn('[ai-assistant] _remotePost fetch error', url, e);
+                _log('warn', '[ai-assistant] _remotePost fetch error', url, e);
                 if (typeof opts.onError === 'function') {
                     opts.onError({ status: 0, message: String(e) });
                 }
             });
         } catch (e) {
-            console.warn('[ai-assistant] _remotePost sync error', e);
+            _log('warn', '[ai-assistant] _remotePost sync error', e);
         }
     }
 
@@ -3406,7 +3516,7 @@
      *   call ``container.innerHTML = ''`` immediately before this call.
      */
     function _showFeedbackThanks(container, answerIndex, answerText, questionText, cfg) {
-        cfg = cfg || (window.AI_ASSISTANT_CONFIG || {});
+        cfg = cfg || _cfg();
         var thanks = (typeof cfg.panelFeedbackThanks === 'string' &&
             cfg.panelFeedbackThanks) || 'Thanks for your feedback!';
 
@@ -3476,7 +3586,7 @@
      *   the previous message text is pre-filled in the textarea.
      */
     function _rebuildFeedbackFormIn(container, answerIndex, answerText, questionText) {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
 
         var question = (typeof cfg.panelFeedbackQuestion === 'string' &&
             cfg.panelFeedbackQuestion) || 'Was this helpful?';
@@ -3664,7 +3774,7 @@
 
             if (cfg.panelFeedbackLog) {
                 // eslint-disable-next-line no-console
-                console.log('[ai-assistant] feedback (via _rebuildFeedbackFormIn)', _redactPayloadForLog(detail));
+                _log('log', '[ai-assistant] feedback (via _rebuildFeedbackFormIn)', _redactPayloadForLog(detail));
             }
 
             _feedbackGivenSet.add(answerIndex);
@@ -4009,7 +4119,7 @@
      * @returns {boolean}
      */
     function _persistEnabled() {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         return cfg.panelPersist !== false;   // default true
     }
 
@@ -4079,7 +4189,7 @@
      *   (stub mode, error path) pass null or omit the argument.
      */
     function _recordMessage(role, text, modelInfo) {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var maxTurns = (typeof cfg.panelMaxTranscriptTurns === 'number' &&
                         cfg.panelMaxTranscriptTurns > 0)
             ? Math.floor(cfg.panelMaxTranscriptTurns)
@@ -4165,7 +4275,7 @@
             showNotification('Nothing to export yet', true);
             return;
         }
-        var cfg   = window.AI_ASSISTANT_CONFIG || {};
+        var cfg   = _cfg();
         var title = cfg.panelTitle || 'AI Assistant';
         var lines = [
             title + ' — conversation export',
@@ -4207,7 +4317,6 @@
      * @returns {Array<Object>}  Flat row objects, one per message.
      */
     function _buildExportRecords() {
-        var cfg     = window.AI_ASSISTANT_CONFIG || {};
         var pageUrl = (typeof location !== 'undefined') ? location.href : '';
         var sid     = _sessionId;
 
@@ -4281,7 +4390,7 @@
             showNotification('Nothing to export yet', true);
             return;
         }
-        var cfg       = window.AI_ASSISTANT_CONFIG || {};
+        var cfg       = _cfg();
         var aiName    = cfg.panelTitle || 'AI Assistant';
         var pageUrl   = (typeof location !== 'undefined') ? location.href : '';
         var pageTitle = (typeof document !== 'undefined') ? document.title : '';
@@ -4386,7 +4495,7 @@
     function _buildConvHtmlString() {
         if (_transcript.length === 0) return '';
 
-        var cfg         = window.AI_ASSISTANT_CONFIG || {};
+        var cfg         = _cfg();
         var aiName      = cfg.panelTitle || 'AI Assistant';
         var pageUrl     = (typeof location !== 'undefined') ? location.href : '';
         var pageTitle   = (typeof document !== 'undefined') ? document.title : '';
@@ -4523,7 +4632,7 @@
      */
     function _buildConvTxtString() {
         if (_transcript.length === 0) return '';
-        var cfg   = window.AI_ASSISTANT_CONFIG || {};
+        var cfg   = _cfg();
         var title = cfg.panelTitle || 'AI Assistant';
         var lines = [
             title + ' \u2014 conversation export',
@@ -4569,7 +4678,7 @@
      */
     function _buildConvJsonString() {
         if (_transcript.length === 0) return '';
-        var cfg       = window.AI_ASSISTANT_CONFIG || {};
+        var cfg       = _cfg();
         var aiName    = cfg.panelTitle || 'AI Assistant';
         var pageUrl   = (typeof location !== 'undefined') ? location.href : '';
         var pageTitle = (typeof document !== 'undefined') ? document.title : '';
@@ -4907,7 +5016,7 @@ opts.jsonPayload + '\n' +
             document.body.appendChild(a);
             a.click();
         } catch (blobErr) {
-            console.warn('[ai-assistant] _downloadBlob failed', blobErr);
+            _log('warn', '[ai-assistant] _downloadBlob failed', blobErr);
         } finally {
             try { document.body.removeChild(a); } catch (_) {}
             setTimeout(function () {
@@ -4943,7 +5052,7 @@ opts.jsonPayload + '\n' +
      * HTMLElement  A wrapper div containing trigger button + dropdown menu.
      */
     function _buildExportDropdownBtn(opts) {
-        var options    = (typeof opts === 'object' && opts !== null) ? opts : {};
+        var options    = (opts && typeof opts === 'object') ? opts : {};
         var onLinkMode = typeof options.onLinkMode === 'function' ? options.onLinkMode : null;
 
         var wrapper = document.createElement('div');
@@ -5230,7 +5339,7 @@ opts.jsonPayload + '\n' +
      */
     function _shareAnswer(answerText, questionText, bubbleEl, btn, answerIndex) {
         var raw    = (bubbleEl && bubbleEl.getAttribute('data-raw')) || answerText;
-        var cfg    = window.AI_ASSISTANT_CONFIG || {};
+        var cfg    = _cfg();
         var aiName = cfg.panelTitle || 'AI Assistant';
         var pageUrl = (typeof location !== 'undefined') ? location.href : '';
 
@@ -5732,7 +5841,7 @@ opts.jsonPayload + '\n' +
      * @param {HTMLElement} body
      */
     function _renderWelcome(body) {
-        var cfg     = window.AI_ASSISTANT_CONFIG || {};
+        var cfg     = _cfg();
         var title   = cfg.panelTitle || 'AI Assistant';
         var quickQs = Array.isArray(cfg.panelQuickQuestions)
             ? cfg.panelQuickQuestions.slice(0, 5) : [];
@@ -5827,7 +5936,7 @@ opts.jsonPayload + '\n' +
      */
     function _bindShortcut() {
         if (_shortcutBound) return;
-        var cfg  = window.AI_ASSISTANT_CONFIG || {};
+        var cfg  = _cfg();
         var spec = typeof cfg.panelShortcut === 'string'
             ? cfg.panelShortcut : 'Alt+Shift+A';
         var pred = _parseShortcut(spec);
@@ -5840,7 +5949,7 @@ opts.jsonPayload + '\n' +
 
     /** Human-readable shortcut label for the hint chip (or '' if disabled). */
     function _shortcutLabel() {
-        var cfg  = window.AI_ASSISTANT_CONFIG || {};
+        var cfg  = _cfg();
         var spec = typeof cfg.panelShortcut === 'string'
             ? cfg.panelShortcut : 'Alt+Shift+A';
         return _parseShortcut(spec) ? spec : '';
@@ -6207,7 +6316,7 @@ opts.jsonPayload + '\n' +
      *   ``.ai-assistant-panel-feedback--revealed`` on the existing block.
      */
     function _buildFbkFloat(answerIndex, answerText, questionText) {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         if (cfg.panelFeedback === false) return null;
         if (_feedbackGivenSet.has(answerIndex)) return null;
 
@@ -6579,7 +6688,7 @@ opts.jsonPayload + '\n' +
     }
 
     function _buildFeedbackBlock(answerIndex, answerText, questionText) {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         if (cfg.panelFeedback === false) return null;     // opt-out
         if (_feedbackGivenSet.has(answerIndex)) return null;
 
@@ -6837,7 +6946,7 @@ opts.jsonPayload + '\n' +
             }
             if (cfg.panelFeedbackLog) {
                 // eslint-disable-next-line no-console
-                console.log('[ai-assistant] feedback', _redactPayloadForLog(detail));
+                _log('log', '[ai-assistant] feedback', _redactPayloadForLog(detail));
             }
             _feedbackGivenSet.add(answerIndex);
             // v3: persist the full detail schema so share export enrichment,
@@ -6935,7 +7044,7 @@ opts.jsonPayload + '\n' +
      *      was already open is still the active view (no navigation side-effect).
      */
     function _buildSheetHamburgerBtn(sheet, idSuffix, closeExtra) {  // closeExtra retained for call-site compat; not invoked
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         if (cfg.panelHamburger === false) return null;
         var btn = _createIconBtn('sheet-ham-' + idSuffix, 'Open menu', ICONS.menu);
         btn.title = 'Open menu';
@@ -7011,8 +7120,7 @@ opts.jsonPayload + '\n' +
         'use strict';
 
         // ── Safety guard ──────────────────────────────────────────────────────
-        var _epSafe = (typeof _EP !== 'undefined' && _EP &&
-                       typeof _EP.resolve === 'function') ? _EP : null;
+        var _epSafe = (typeof _EP.resolve === 'function') ? _EP : null;
 
         // ── Shared constants ──────────────────────────────────────────────────
         var _FEATURE_DEFS = [
@@ -8354,7 +8462,7 @@ opts.jsonPayload + '\n' +
         // ── E: Dataset Endpoint + Token status ────────────────────────────
         // NEW (vNEXT). Discovers the HuggingFace dataset repo and the server's
         // HF-token posture WITHOUT exposing any secret. Two-source priority:
-        //   P1  window.AI_ASSISTANT_CONFIG.panelDatasetRepo  (conf.py override)
+        //   P1  _cfg().panelDatasetRepo  (conf.py override)
         //   P2  GET {proxyBase}/  → .training.dataset_repo    (auto-discovery)
         // The same GET / response also carries tokens.{hf_token_type,
         // hf_write_token_type,least_privilege_mode} — surfaced as a read-only
@@ -8474,7 +8582,11 @@ opts.jsonPayload + '\n' +
         function _buildDatasetLinkCard(icon, label, url) {
             var a = document.createElement('a');
             a.className = 'ai-assistant-panel-ep-ext-dataset-card';
-            a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+            // Defense in depth: link only if the scheme is safe; otherwise the
+            // card renders as inert text (no javascript:/data: href).
+            if (_isSafeHref(url)) {
+                a.href = url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+            }
             a.setAttribute('aria-label', label + ' \u2014 opens in a new tab');
 
             var iconEl = document.createElement('span');
@@ -8568,7 +8680,7 @@ opts.jsonPayload + '\n' +
 
         /** Orchestrate discovery / config, then render links + token posture. */
         function _buildDatasetSection(statusRow, linksWrap, tokenRow) {
-            var _cfg = window.AI_ASSISTANT_CONFIG || {};
+            var _cfg = _cfg();
 
             // P1: explicit panel config wins — no network call.
             var explicitRepo = (_cfg.panelDatasetRepo || '').trim();
@@ -8819,9 +8931,12 @@ opts.jsonPayload + '\n' +
                 var urlTxt;
                 if (fullUrl) {
                     urlTxt          = document.createElement('a');
-                    urlTxt.href     = fullUrl;
-                    urlTxt.target   = '_blank';
-                    urlTxt.rel      = 'noopener noreferrer';
+                    // Defense in depth: link only if the scheme is safe.
+                    if (_isSafeHref(fullUrl)) {
+                        urlTxt.href   = fullUrl;
+                        urlTxt.target = '_blank';
+                        urlTxt.rel    = 'noopener noreferrer';
+                    }
                     urlTxt.setAttribute('title', fullUrl);
                     urlTxt.textContent = fullUrl;
                     urlTxt.appendChild(_makeCopyBtn(function (u) {
@@ -9663,7 +9778,7 @@ opts.jsonPayload + '\n' +
     }
 
         function _buildPrivacySheet() {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var title = (typeof cfg.panelPrivacyTitle === 'string' &&
             cfg.panelPrivacyTitle) || 'Privacy & Responsibility';
 
@@ -9852,7 +9967,7 @@ opts.jsonPayload + '\n' +
      *                          info_url, description, default} or null.
      */
     function _buildModelInfo(cfg) {
-        var activeModel = _getActiveModel ? _getActiveModel(cfg) : null;
+        var activeModel = _getActiveModel(cfg);
         if (activeModel) {
             return {
                 id:          activeModel.id,
@@ -10348,7 +10463,7 @@ opts.jsonPayload + '\n' +
      * @returns {HTMLElement}
      */
     function _buildModelSheet() {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var sheet = document.createElement('div');
         sheet.className = 'ai-assistant-panel-privacy ai-assistant-panel-model-sheet';
         sheet.id = 'ai-assistant-panel-model-sheet';
@@ -10724,7 +10839,7 @@ opts.jsonPayload + '\n' +
                 var id = m.id;
                 _setActiveModelId(id);
                 try {
-                    var liveModels = (window.AI_ASSISTANT_CONFIG || {}).panelApiModels;
+                    var liveModels = _cfg().panelApiModels;
                     var liveM = _findModel(
                         Array.isArray(liveModels) ? liveModels : models, id
                     );
@@ -10895,7 +11010,7 @@ opts.jsonPayload + '\n' +
 
         // ── Threshold: only attach when there are enough models to warrant it ─
         // Configurable: set panelFilterThreshold in conf.py (default 2).
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var THRESHOLD = _safeInt(cfg.panelFilterThreshold, 1, 9999, 2);
         if (!models || models.length < THRESHOLD) return;
 
@@ -12097,7 +12212,7 @@ opts.jsonPayload + '\n' +
      * @returns {HTMLElement}
      */
     function _buildTermsSheet() {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var title = (typeof cfg.panelTermsTitle === 'string' &&
             cfg.panelTermsTitle) || 'Terms of Service';
 
@@ -12224,7 +12339,7 @@ opts.jsonPayload + '\n' +
      *   so no deregistration is needed — see the registry docblock.
      */
     function _buildShareExportSection(opts) {
-        var options    = (typeof opts === 'object' && opts !== null) ? opts : {};
+        var options    = (opts && typeof opts === 'object') ? opts : {};
         var onLinkMode = typeof options.onLinkMode === 'function' ? options.onLinkMode : null;
 
         // ── Format registry ───────────────────────────────────────────────────
@@ -12497,10 +12612,10 @@ opts.jsonPayload + '\n' +
     }
 
     function _buildShareSheet(opts) {
-        var sheetOpts  = (typeof opts === 'object' && opts !== null) ? opts : {};
+        var sheetOpts  = (opts && typeof opts === 'object') ? opts : {};
         var onLinkMode = typeof sheetOpts.onLinkMode === 'function'
             ? sheetOpts.onLinkMode : null;
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var label = (typeof cfg.panelShareLabel === 'string' &&
             cfg.panelShareLabel) || 'Share';
 
@@ -12791,7 +12906,7 @@ opts.jsonPayload + '\n' +
         // conditional global-share and training tiers below — can access it
         // without a ReferenceError (BUG-FIX: cfg was only declared inside the
         // permSaveBtn click closure, making it invisible at function-body scope).
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
 
         // ── Per-format metadata ────────────────────────────────────────────────
         var _fmtMeta = {
@@ -13812,7 +13927,7 @@ opts.jsonPayload + '\n' +
      *     The assembled sheet element (data-open="false" initially).
      */
     function _buildLinksSheet() {
-        var cfg    = window.AI_ASSISTANT_CONFIG || {};
+        var cfg    = _cfg();
         var title  = (typeof cfg.panelLinksTitle === 'string' && cfg.panelLinksTitle)
                      || 'Project Links';
 
@@ -13839,6 +13954,7 @@ opts.jsonPayload + '\n' +
         bodyEl.className = 'ai-assistant-panel-privacy-body ai-assistant-panel-links-body';
 
         if (typeof cfg.panelLinksHtml === 'string' && cfg.panelLinksHtml) {
+            // Trusted, author-supplied (from conf.py, not end-user input).
             bodyEl.innerHTML = cfg.panelLinksHtml;
         } else {
             function _buildLinkCard(iconHtml, heading, desc, url, accent) {
@@ -13940,8 +14056,7 @@ opts.jsonPayload + '\n' +
                 if (!_hfEndpointUrl) {
                     var _trainUrl = '';
                     try {
-                        if (typeof _EP !== 'undefined' && _EP
-                            && typeof _EP.resolve === 'function') {
+                        if (typeof _EP.resolve === 'function') {
                             _trainUrl = _EP.resolve('training') || '';
                         }
                     } catch (_e) { _trainUrl = ''; }
@@ -14181,7 +14296,7 @@ opts.jsonPayload + '\n' +
      *   opens the model sheet where the user selects a model via radio button.
      */
     function _buildInlineModelPicker() {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         if (cfg.panelInlineModelPicker === false) return null;
         var models = Array.isArray(cfg.panelApiModels) ? cfg.panelApiModels : [];
         if (models.length === 0) return null;
@@ -14245,7 +14360,7 @@ opts.jsonPayload + '\n' +
         // re-querying the closure, and so the button always reflects the live
         // panelApiModels list even when hot-reloaded after DOMContentLoaded.
         btn._syncState = function (id) {
-            var freshModels = (window.AI_ASSISTANT_CONFIG || {}).panelApiModels;
+            var freshModels = _cfg().panelApiModels;
             var m = _findModel(
                 Array.isArray(freshModels) ? freshModels : models,
                 id
@@ -14282,7 +14397,7 @@ opts.jsonPayload + '\n' +
      * @returns {HTMLElement}
      */
     function _buildSearchBar(mini) {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         var ph  = (typeof cfg.panelSearchPlaceholder === 'string' &&
             cfg.panelSearchPlaceholder) || 'Ask AI about these docs\u2026';
 
@@ -14353,7 +14468,7 @@ opts.jsonPayload + '\n' +
      * Any value other than "top" falls back to "bottom" (pre-existing behaviour).
      */
     function _mountSearchBar() {
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         if (!cfg.searchBar) return;                       // default off
         var sel = (typeof cfg.searchBarSelector === 'string' &&
             cfg.searchBarSelector) || '';
@@ -14408,7 +14523,7 @@ opts.jsonPayload + '\n' +
      * @returns {HTMLElement}
      */
     function createAIPanel() {
-        var cfg         = window.AI_ASSISTANT_CONFIG || {};
+        var cfg         = _cfg();
         var title       = cfg.panelTitle       || 'AI Assistant';
         var placeholder = cfg.panelPlaceholder || 'Ask a question about this page\u2026';
         // Quick-suggestion chips are now built by _renderWelcome (shared with
@@ -14505,7 +14620,7 @@ opts.jsonPayload + '\n' +
         // The hamburger popover is still opened by the header button and wired
         // below.  The right overflow button (⋯) shares the same popover for
         // narrow viewports.
-        var cfgRef = window.AI_ASSISTANT_CONFIG || {};
+        var cfgRef = _cfg();
         var subbar = document.createElement('div');
         subbar.className = 'ai-assistant-panel-subbar';
 
@@ -14599,8 +14714,7 @@ opts.jsonPayload + '\n' +
         privacyLink.className = 'ai-assistant-panel-privacy-link';
         privacyLink.type = 'button';
         privacyLink.textContent =
-            (window.AI_ASSISTANT_CONFIG &&
-             window.AI_ASSISTANT_CONFIG.panelPrivacyLinkText) ||
+            (_cfg().panelPrivacyLinkText) ||
             'Privacy & Responsibility';
 
         // Terms-of-Service link — sibling of Privacy, same CSS class so the
@@ -14694,7 +14808,7 @@ opts.jsonPayload + '\n' +
         // Resolve the active profile label for the initial button text.
         (function () {
             var _epBtnLabel = 'Endpoint Configuration';
-            if (typeof _EP !== 'undefined' && _EP && _EP.hasProfiles && _EP.hasProfiles()) {
+            if (typeof _EP.hasProfiles === 'function' && _EP.hasProfiles()) {
                 var _activeProfiles = _EP.list();
                 var _activeKey      = _EP.getActive();
                 for (var _pi = 0; _pi < _activeProfiles.length; _pi++) {
@@ -15692,7 +15806,7 @@ opts.jsonPayload + '\n' +
         var label = document.createElement('span');
         // BUG-FIX: was hardcoded 'Ask AI' — now reads cfg.panelTriggerLabel
         // so ai_assistant_panel_trigger_label in conf.py is actually applied.
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         label.textContent = cfg.panelTriggerLabel || 'Ask AI';
 
         trigger.appendChild(iconWrap);
@@ -16199,7 +16313,7 @@ opts.jsonPayload + '\n' +
     function _notifyExportState() {
         var state = Object.freeze({ linkMode: _exportLinkMode });
         for (var _nei = 0; _nei < _exportStateListeners.length; _nei++) {
-            try { _exportStateListeners[_nei](state); } catch (_e) {}
+            try { _exportStateListeners[_nei](state); } catch (_e) { _log('debug', 'export-state subscriber threw', _e); }
         }
     }
 
@@ -16743,7 +16857,7 @@ opts.jsonPayload + '\n' +
                 if (callback) { callback(stream); }
             })
             .catch(function (err) {
-                console.warn('AI Assistant: Warm stream acquisition failed:', err);
+                _log('warn', 'AI Assistant: Warm stream acquisition failed:', err);
                 _micWarmStream = null;
                 if (callback) { callback(null); }
             });
@@ -17419,9 +17533,6 @@ opts.jsonPayload + '\n' +
 
         var protocol = window.location.protocol;
         var hostname = window.location.hostname;
-        var showLocalhostWarning =
-            window.location.protocol === 'file:';
-
         var insecureOrigin =
             protocol === 'file:' ||
             (
@@ -18190,7 +18301,7 @@ opts.jsonPayload + '\n' +
                 _speechRecognitionEnded = true;
                 _pendingSpeechStart = false;
 
-                console.error(
+                _log('error',
                     'AI Assistant: Speech recognition start error:',
                     err
                 );
@@ -18223,7 +18334,7 @@ opts.jsonPayload + '\n' +
             }).catch(function (err) {
                 // Device unavailable (disconnected, permission denied) — fall back
                 // to the browser default silently so recording still works.
-                console.warn('AI Assistant: Device pin failed, using browser default:', err);
+                _log('warn', 'AI Assistant: Device pin failed, using browser default:', err);
                 _micPinTrack = null;
                 _acquireMicWarmStream(function () { _doStart(); });
             });
@@ -18533,7 +18644,7 @@ opts.jsonPayload + '\n' +
                     // Permission denied or hardware unavailable — proceed without
                     // Web Audio.  The user will see normal recognition behaviour;
                     // silence detection degrades to result-gap timer only.
-                    console.warn(
+                    _log('warn',
                         'AI Assistant banner: getUserMedia failed, '
                         + 'using recognition-only fallback:',
                         err
@@ -18728,7 +18839,7 @@ opts.jsonPayload + '\n' +
             _bannerStarting     = false;
             _bannerEnded        = true;
             _bannerPendingStart = false;
-            console.error('AI Assistant banner: recognition start error:', err);
+            _log('error', 'AI Assistant banner: recognition start error:', err);
             showNotification(
                 'Could not start microphone. Check browser permissions.',
                 true
@@ -18874,7 +18985,7 @@ opts.jsonPayload + '\n' +
                 _bannerAudioCtx.resume().catch(function () {});
             }
         } catch (err) {
-            console.warn('AI Assistant banner: Web Audio stream connection failed:', err);
+            _log('warn', 'AI Assistant banner: Web Audio stream connection failed:', err);
             _bannerAnalyser = null;
             _bannerAudioSrc = null;
         }
@@ -19107,7 +19218,7 @@ opts.jsonPayload + '\n' +
                 _audioCtx.resume().catch(function () {});
             }
         } catch (err) {
-            console.warn('AI Assistant: Web Audio connect failed:', err);
+            _log('warn', 'AI Assistant: Web Audio connect failed:', err);
             _audioCtx = null; _analyserNode = null; _audioSrcNode = null;
         }
     }
@@ -19742,7 +19853,7 @@ opts.jsonPayload + '\n' +
         // Each transcript entry carries the model that generated it — enables
         // per-model analytics in JSON exports and DataFrame groupby operations.
         var modelInfo = (role === 'assistant')
-            ? _getActiveModel(window.AI_ASSISTANT_CONFIG || {})
+            ? _getActiveModel_cfg()
             : null;
 
         _recordMessage(role, text, modelInfo);   // v2: includes modelInfo
@@ -19797,9 +19908,9 @@ opts.jsonPayload + '\n' +
 
         // ── Typing indicator ──────────────────────────────────────────────
         var body = document.getElementById('ai-assistant-panel-body');
-        var typingEl = body ? _showTypingIndicator(body) : null;
+        if (body) { _showTypingIndicator(body); }
 
-        var cfg = window.AI_ASSISTANT_CONFIG || {};
+        var cfg = _cfg();
         try {
             if (cfg.panelApiEnabled) {
                 await _panelApiCall(questionText, cfg);
@@ -19814,7 +19925,7 @@ opts.jsonPayload + '\n' +
             if (err && err.name === 'AbortError') {
                 // Intentional cancellation — swallow silently.
             } else {
-                console.error('AI Assistant panel error:', err);
+                _log('error', 'AI Assistant panel error:', err);
                 _appendPanelMessage('Sorry, something went wrong: ' + err.message, 'error');
             }
         } finally {
@@ -19930,7 +20041,7 @@ opts.jsonPayload + '\n' +
 
         // ── 3. Build page context (best-effort; never throws) ─────────────
         var pageMarkdown = '';
-        try { pageMarkdown = await convertToMarkdown(); } catch (_) {}
+        try { pageMarkdown = await convertToMarkdown(); } catch (_e) { _log('debug', 'page-context Markdown conversion failed', _e); }
 
         // FIX Issue 7: configurable token and context limits.
         // Global defaults come from cfg; per-model overrides take precedence.
@@ -20139,7 +20250,7 @@ opts.jsonPayload + '\n' +
         } catch (readerErr) {
             // Some browsers (iOS Safari 14.0, partial ReadableStream) report a
             // non-null body but throw on getReader(). Fall back to JSON parsing.
-            console.warn('[ai-assistant] ReadableStream.getReader() failed; JSON fallback', readerErr);
+            _log('warn', '[ai-assistant] ReadableStream.getReader() failed; JSON fallback', readerErr);
             try {
                 var fbData = await response.clone().json().catch(function () { return {}; });
                 var fbReply = (fbData && (fbData.reply || fbData.answer || fbData.text)) || '';
@@ -20191,7 +20302,7 @@ opts.jsonPayload + '\n' +
                                 var ep = JSON.parse(errPayload);
                                 errMsg = (ep && (ep.error || ep.message || ep.detail)) || errPayload;
                             } catch (_) { errMsg = errPayload; }
-                            console.error('AI Assistant: SSE server error event:', errMsg);
+                            _log('error', 'AI Assistant: SSE server error event:', errMsg);
                             // Replace streaming bubble with error bubble so the
                             // user sees the failure, not an empty reply.
                             if (streamBubble && streamBubble.parentNode) {
@@ -20202,7 +20313,6 @@ opts.jsonPayload + '\n' +
                                 String(errMsg).slice(0, 200),
                                 'error'
                             );
-                            sseEventType = 'message';
                             return;  // abort further SSE processing
                         }
                         try {
@@ -20226,7 +20336,7 @@ opts.jsonPayload + '\n' +
         streamBubble.classList.remove('ai-assistant-panel-bubble--streaming');
         // v2: capture model info before _recordMessage so it is stored in
         // the transcript entry for export and share-payload attribution.
-        var _streamModelInfo = _getActiveModel(window.AI_ASSISTANT_CONFIG || {});
+        var _streamModelInfo = _getActiveModel_cfg();
         _recordMessage('assistant', accumulated || '(no response)', _streamModelInfo);
         // Read the timestamp just stored — same single-threaded guarantee as
         // _appendPanelMessage: the last _transcript entry is this streamed reply.
@@ -20323,6 +20433,30 @@ opts.jsonPayload + '\n' +
             'assistant'
         );
     }
+
+    // ── Shared surface: window.AI_ASSISTANT ──────────────────────────────────
+    // A small, stable namespace exposing the symbols shared between the
+    // lightweight toolbar buttons (copy / view-as-Markdown / ask-LLM / PDF) and
+    // the heavier AI chat panel. This is the seam along which the widget is
+    // being split into separate core / panel bundles: once split, panel code
+    // reads config, resolves asset URLs and reuses icons + utilities through
+    // this object instead of a shared closure.
+    //
+    // Purely additive today — no internal code depends on it yet, so behaviour
+    // is unchanged. Mirrors the optional-integration shape of window.AI_COMPAT.
+    // Accessors are lazy so they always reflect current config and resolve the
+    // static path at call time.
+    (function _exposeSharedSurface() {
+        var ns = window.AI_ASSISTANT = window.AI_ASSISTANT || {};
+        if (ns._wired) { return; }              // idempotent across re-injection
+        ns._wired          = true;
+        ns.config          = function () { return _cfg(); };
+        ns.getStaticPath   = getStaticPath;     // asset base URL resolver
+        ns.icons           = ICONS;             // inline SVG map
+        ns.fetch           = _fetch;            // AI_COMPAT-aware fetch
+        ns.hapticFeedback  = _hapticFeedback;   // no-op where unsupported
+        ns.attachLongPress = _attachLongPress;  // pointer long-press helper
+    }());
 
     // ── Bootstrap ─────────────────────────────────────────────────────────────
 

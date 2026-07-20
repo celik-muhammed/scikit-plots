@@ -681,6 +681,7 @@ pip install -U -i https://pypi.anaconda.org/scikit-plots-wheels-staging-nightly/
 
 ```bash
 ## If you want to install the latest version from GitHub
+## voyager @ git+https://github.com/spotify/voyager.git@v2.1.1#subdirectory=python
 pip install git+https://github.com/scikit-plots/scikit-plots.git@main
 ## (Added C, Cpp, Fortran Support) Works with standard Python (CPython)
 pip install git+https://github.com/scikit-plots/scikit-plots.git@maintenance/0.4.x
@@ -700,6 +701,7 @@ pip install git+https://github.com/scikit-plots/scikit-plots.git@maintenance/0.3
 
 ```bash
 ## If you want to install one of archived version from GitHub
+## voyager @ git+https://github.com/spotify/voyager.git@v2.1.1#subdirectory=python
 pip install git+https://github.com/scikit-plots/scikit-plots.git@v0.4.0
 pip install git+https://github.com/scikit-plots/scikit-plots.git@v0.3.9rc3
 pip install git+https://github.com/scikit-plots/scikit-plots.git@v0.3.7
@@ -1234,7 +1236,7 @@ https://emojidb.org/
 
  🔄 ➡️ ↖️ ⬇️ ✏️ ✎ ☰ 🧾 📝 ⬜ ⃣ 🔍︎ 🔎 ⌕ ⌗ ⏱ 🏍 ⟳ 𓍝 ↳ ➥ ✐ᝰ. ➜] ↯  ⃢▸
 
-🔗 🤖 👾 ⚙️ 🇦🇮 🌐 ⚡ ⭐ ✨ 🌟 💫 🪐 🧭 📍 🌍 ˙✧ 📷 ⋆｡˚
+🔗 🤖 👾 ⚙️ 🇦🇮 🌐 ⚡ 🌻 🌄 🌅 🌞 ☀️ 🌤️ ⛅ ⭐ ✨ 🌟 💫 🪐 🧭 📍 🌍 ˙✧ 📷 ⋆｡˚
 
 🏷️ 🔖 🧮 💥 💣 ✷ ☄️ 🚀 🔎 🔍 💿 💽 📤 📥 ➜] ⬇️ ⬆️ 🗃️ ➡️ ⓘ
 

@@ -11745,7 +11745,7 @@ a.ai-assistant-panel-ep-card-detail-url:focus-visible {
  */
 .ai-assistant-share-export-cards {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(56px, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(56px, 1fr));
     gap: 0.4rem;
     padding: 0.55rem 0 0.3rem;
 }
@@ -13188,4 +13188,120 @@ a.ai-assistant-panel-ep-card-detail-url:focus-visible {
     .ai-assistant-panel-custom-del-btn {
         transition: none;
     }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   PRINT / "Save as PDF" — merged from ai-assistant-print.css.
+   Screen rendering is untouched: all layout rules live inside @media print;
+   the one screen rule hides the print-only header injected by _printWithHeader().
+   ═══════════════════════════════════════════════════════════════════════ */
+.ai-assistant-print-header { display: none; }
+
+@media print {
+
+  /* (1) Hide the AI Assistant widget and all of its overlays. */
+  #ai-assistant-container,
+  .ai-assistant-container,
+  .ai-assistant-panel,
+  .ai-assistant-trigger,
+  .ai-assistant-backdrop,
+  .ai-assistant-dropdown,
+  .ai-assistant-notification,
+  .ai-assistant-share-sheet,
+  .ai-assistant-model-sheet { display: none !important; }
+
+  /* (2) Hide site chrome (PyData theme): header, sidebars, TOC, search, footer,
+         prev/next, theme switch. Adjust these selectors for other themes. */
+  .bd-header,
+  .bd-header-announcement,
+  .bd-sidebar-primary,
+  .bd-sidebar-secondary,
+  .bd-toc,
+  .bd-sidebar,
+  .sidebar-toggle,
+  .bd-sidebar-toggle,
+  .prev-next-area,
+  .prev-next-bottom,
+  .bd-footer,
+  .bd-footer-article,
+  footer,
+  .searchbox,
+  .search-button__wrapper,
+  .search-button-field,
+  .header-article,
+  .theme-switch-button,
+  .bd-header-article,
+  #pst-back-to-top,
+  .editthispage { display: none !important; }
+
+  /* (3) Give the article the full page width. */
+  .bd-main,
+  .bd-content,
+  .bd-article-container,
+  .bd-article,
+  main,
+  article {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    float: none !important;
+    grid-template-columns: 1fr !important;
+  }
+
+  /* (4) Ink-friendly: black on white, no shadows or heavy backgrounds. */
+  html, body {
+    background: #fff !important;
+    color: #000 !important;
+    font-size: 11pt;
+  }
+  * { box-shadow: none !important; text-shadow: none !important; }
+  a { color: #000 !important; text-decoration: underline; }
+
+  /* Reveal external link targets after the text; skip in-page and JS links. */
+  article a[href^="http"]::after {
+    content: " (" attr(href) ")";
+    font-size: 0.85em;
+    color: #333;
+    word-break: break-all;
+  }
+  article a[href^="#"]::after,
+  article a[href^="javascript:"]::after { content: ""; }
+
+  /* (5) Keep code, figures, tables, admonitions and headings intact across
+         page breaks; wrap long code instead of clipping it. */
+  pre, blockquote, figure, img, table, .highlight, .admonition {
+    break-inside: avoid;
+    page-break-inside: avoid;
+  }
+  h1, h2, h3, h4 { break-after: avoid; page-break-after: avoid; }
+  pre, code {
+    white-space: pre-wrap !important;
+    word-wrap: break-word;
+    overflow-wrap: anywhere;
+  }
+  img { max-width: 100% !important; height: auto !important; }
+
+  /* (6) Page margins. */
+  @page { margin: 18mm 16mm; }
+
+  /* (7) The injected print header (title, URL, date). */
+  .ai-assistant-print-header {
+    display: block !important;
+    margin: 0 0 10mm 0;
+    padding: 0 0 5mm 0;
+    border-bottom: 1px solid #999;
+    color: #000;
+  }
+  .ai-assistant-print-header .ai-pph-title {
+    font-size: 1.3em;
+    font-weight: 700;
+    margin: 0 0 2mm 0;
+    line-height: 1.2;
+  }
+  .ai-assistant-print-header .ai-pph-meta {
+    font-size: 0.85em;
+    color: #444;
+    word-break: break-all;
+  }
 }
