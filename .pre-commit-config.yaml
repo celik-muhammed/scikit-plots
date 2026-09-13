@@ -61,8 +61,9 @@ repos:
   #     - id: rst-linter
 
   # Documentation and Specialized Linting
-  - repo: https://github.com/woodruffw/zizmor-pre-commit
-    rev: v1.29.0
+  # - repo: https://github.com/woodruffw/zizmor-pre-commit
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.30.0
     hooks:
       # pre-commit run zizmor --all-files --verbose
       - id: zizmor
@@ -77,6 +78,11 @@ repos:
         # args: ["--branch=main"]
       - id: check-merge-conflict  # Checks for merge conflict markers in files.
       - id: detect-private-key  # Checks for the existence of private keys.
+        # exclude: "^(\
+        #     scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/tests/test_untrusted_context.mjs\
+        #     |scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/tests/test_logging_privacy.py\
+        #     |scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/tests/test_stub_model.py\
+        #   )$"
       - id: check-added-large-files  # Prevent giant files from being committed.
         args: ["--enforce-all", "--maxkb=333"]  # 333 KB is the default size limit.
         exclude: "^(\
@@ -215,7 +221,7 @@ repos:
 
   # 1. Cython formatting/fixes Linting
   - repo: https://github.com/MarcoGorelli/cython-lint
-    rev: v0.21.0
+    rev: v0.21.1
     hooks:
       # TODO: add the double-quote-cython-strings hook when it's usability has improved:
       # possibility to pass a directory and use it as a check instead of auto-formatter.
@@ -225,7 +231,7 @@ repos:
 
   # 2. Ruff auto-fixes
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.4
+    rev: v0.16.6
     hooks:
       # - id: ruff  # Run the linter.
       # pre-commit run ruff-check --all-files --verbose
@@ -274,6 +280,7 @@ repos:
               |docs/source\
               |galleries\
               |maintenances\
+              |skills\
               |third_party\
               |tools\
               |tests\
@@ -296,7 +303,7 @@ repos:
   #       args: ["--config", ".ruff.toml"]  # Point to your custom ruff.toml file
   # Code Quality: Linting and Formating Static Analysis
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.16.4
+    rev: v0.16.6
     hooks:
       # Formatter: ruff-format vs flake8 can be conflict make sure both compatipable
       # pre-commit run ruff-format --all-files --verbose

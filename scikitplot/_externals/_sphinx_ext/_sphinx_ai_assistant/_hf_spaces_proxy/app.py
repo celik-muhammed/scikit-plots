@@ -5,15 +5,15 @@
 # Authors: The scikit-plots developers
 # SPDX-License-Identifier: BSD-3-Clause
 #
-# scikit-plots/ai  ·  _hf_spaces_proxy/app.py  v6.2.0
+# scikit-plots/ai  ·  _hf_spaces_proxy/app.py  v7.4.0
 #
-# Thin OpenAI-compatible reverse proxy for sphinx-ai-assistant.
+# Server-authoritative chat proxy for sphinx-ai-assistant.
 #
 # THREE-PATH ROUTING  (evaluated in order)
 # ─────────────────────────────────────────
 #   Path 1 — BACKEND_URL set  (explicit custom backend override)
-#     Forward verbatim to BACKEND_URL.
-#     HF_TOKEN injected as Bearer token when also set.
+#     Forward the server-constructed provider request to BACKEND_URL.
+#     Only BACKEND_AUTH_TOKEN may be attached; HF_TOKEN is never reused here.
 #     Read timeout: PROXY_TIMEOUT (default 600 s).
 #
 #   Path 2 — Model namespace in HF_SPACES_MODEL_NAMESPACES
@@ -43,18 +43,25 @@
 #
 # ENVIRONMENT VARIABLES  (Space → Settings → Repository secrets)
 # ─────────────────────────────────────────────────────────────
-#   HF_TOKEN            Required for Path 3 (read/inference).  Optional for
-#                       write operations when HF_WRITE_TOKEN is set.
-#   HF_WRITE_TOKEN      Write-scoped token for POST /v1/contribute (dataset
-#                       push).  When set, inference uses HF_TOKEN (read-only)
-#                       and dataset writes use HF_WRITE_TOKEN — principle of
-#                       least privilege.  Falls back to HF_TOKEN when absent
-#                       so existing single-token deployments keep working.
+#   HF_TOKEN            Required for Path 3 (read/inference). Keep this token
+#                       inference-only whenever a separate dataset token exists.
+#   HF_DATASET_TOKEN    Preferred persistence token for feedback/contributions.
+#                       A fine-grained token scoped to write only the target
+#                       dataset repo is recommended; classic Write also works.
+#   HF_WRITE_TOKEN      Historical alias for HF_DATASET_TOKEN. Despite the name,
+#                       a repo-scoped fine-grained token is valid. Falls back to
+#                       HF_TOKEN only for backward-compatible single-token setups.
 #   HF_SPACES_MODEL_URL Path 2 destination URL.
 #                       Default: https://scikit-plots-ai-model.hf.space/v1/chat/completions
 #   HF_SPACES_MODEL_NAMESPACES  Comma-separated owner namespaces for Path 2.
 #                       Default: scikit-plots
-#   BACKEND_URL         Path 1 override (all requests go here when set).
+#   BACKEND_URL         Path 1 override (server-constructed requests go here).
+#   BACKEND_AUTH_TOKEN  Optional bearer token bound only to BACKEND_URL.
+#   PROVIDER_ARTIFACT_OPENAI_TOKEN Separate server-only OpenAI token for binary artifact output.
+#                       Never inferred/reused from BACKEND_AUTH_TOKEN; unset disables OpenAI output.
+#   HF_SPACES_AUTH_TOKEN Optional bearer token bound only to HF_SPACES_MODEL_URL.
+#   ALLOWED_MODELS      Comma-separated exact provider model IDs accepted by chat.
+#                       Default matches the public models in _example_conf.py.
 #   HF_BASE             HF Serverless API base URL.
 #                       Default: https://router.huggingface.co
 #   DEFAULT_MODEL       Fallback model when request body omits "model".
@@ -65,6 +72,9 @@
 #   PROXY_CONNECT_TIMEOUT TCP handshake timeout.  Default: 10.
 #   PROXY_WRITE_TIMEOUT   Request body upload timeout.  Default: 30.
 #   PROXY_POOL_TIMEOUT    Connection pool acquire timeout.  Default: 10.
+#   PROXY_PROTOCOL_RETRIES  Retry a pre-output remote protocol/read failure.
+#                       Bounded to 0..2; default: 1. LocalProtocolError is not
+#                       retried because it indicates a client/request defect.
 #   HF_TOKEN_TYPE       Declare the type of HF_TOKEN so startup validation can
 #                       enforce principle-of-least-privilege without network calls.
 #                       Accepted values: fine-grained | read | write
@@ -72,11 +82,80 @@
 #                       Set to "read" when using a classic read token; set to
 #                       "fine-grained" for new-style scoped tokens.  Never set
 #                       "write" — that triggers a startup WARNING.
-#   HF_WRITE_TOKEN_TYPE Declare the type of HF_WRITE_TOKEN.
-#                       Accepted values: fine-grained | write
-#                       Set to match the token created in HF Settings → Tokens.
-#   ALLOWED_ORIGINS     Comma-separated CORS origins.  Default: *.
-#   MAX_BODY_BYTES      Maximum accepted body size.  Default: 10485760.
+#   HF_DATASET_TOKEN    Preferred dataset-persistence token. A fine-grained
+#                       token scoped to write the target dataset repo is
+#                       recommended. HF_WRITE_TOKEN remains a legacy alias.
+#   HF_DATASET_TOKEN_TYPE  fine-grained | read | write. Read is rejected for
+#                       persistence; fine-grained repo-write is preferred.
+#   HF_WRITE_TOKEN_TYPE Legacy type declaration for HF_WRITE_TOKEN.
+#                       Accepted values: fine-grained | read | write.
+#   ALLOWED_ORIGINS     Comma-separated exact CORS origins. Additive by default; use ALLOWED_ORIGINS_MODE=replace for downstream sites.
+#   ALLOWED_ORIGINS_MODE additive (default) keeps built-in Scikit-plots origins; replace trusts only ALLOWED_ORIGINS.
+#   RECORD_STORAGE_TARGETS  Optional JSON array defining one primary record
+#                       store plus mirrors (huggingface/github/gitlab/bitbucket).
+#                       Credentials are referenced only through env names with
+#                       prefix AI_RECORD_STORAGE_TOKEN_. When absent, legacy
+#                       TRAINING_DATASET_REPO + HF_* token settings are used.
+#   MAX_BODY_BYTES      Maximum accepted JSON-only chat body size. Default: 10485760.
+#   BACKEND_RESOURCE_ADAPTER Provider identity for Path-1 BACKEND_URL raw-resource routing.
+#                       One of openai/anthropic/gemini/huggingface/self_hosted/custom.
+#                       Never inferred from model names; default: custom.
+#   RESOURCE_MAX_FILE_BYTES Maximum one raw chat resource. Default: 512 MiB.
+#   RESOURCE_MAX_TOTAL_BYTES Aggregate raw resources per request. Default: 1 GiB.
+#   RESOURCE_MAX_REQUEST_BYTES Entire multipart request ceiling. Default: resource total + 2 MiB.
+#   ZIP_EDIT_RATE_LIMIT_PER_HOUR Per-IP ZIP edit artifact operations. Default: 20.
+#   PROVIDER_ARTIFACT_RATE_LIMIT_PER_HOUR Per-IP provider binary generation operations. Default: 10.
+#   PROVIDER_ARTIFACT_OUTPUT_ADAPTERS Comma-separated explicit production binary-output adapters.
+#                       Currently: openai. Default: empty (production output disabled).
+#   PROVIDER_ARTIFACT_LIFECYCLE_BACKEND memory (default) or redis. Redis is the shared
+#                       atomic lifecycle authority for multi-worker/multi-replica output + ZIP correlation.
+#   PROVIDER_ARTIFACT_LIFECYCLE_REDIS_URL Redis/rediss URL used only when lifecycle backend=redis.
+#   PROVIDER_ARTIFACT_LIFECYCLE_KEY_PREFIX Shared Redis namespace. Default: sphinx-ai-assistant.
+#   PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TOPOLOGY standalone (default) or cluster. Cluster mode
+#                       uses redis.asyncio.cluster.RedisCluster and requires database 0.
+#   PROVIDER_ARTIFACT_LIFECYCLE_REQUIRE_SHARED Fail provider-output/ZIP provenance closed unless the
+#                       lifecycle backend is initialized shared+authoritative.
+#   MAX_UPSTREAM_RESPONSE_BYTES Maximum decoded upstream response bytes. Default: 8388608.
+#   SHARE_MAX_BODY_BYTES Global Share request/canonical snapshot limit. Default: 512000.
+#   SHARE_MAX_ENTRIES   Maximum live in-memory Global Share entries. Default: 256.
+#   SHARE_MAX_TOTAL_BYTES Aggregate live Global Share byte budget. Default: 16777216.
+#   SHARE_WRITE_TOKEN   Optional server-only create gate for POST /v1/share.
+#                       Never bake this into static Sphinx HTML.
+#   SHARE_PUBLIC_BASE_URL Optional externally-visible HTTPS base for Share links.
+#   SHARE_STORE_BACKEND memory (compatibility), sqlite (restart-durable local),
+#                       or redis (shared multi-replica authority).
+#   SHARE_STORE_SQLITE_PATH SQLite file used when backend=sqlite.
+#   SHARE_STORE_REDIS_URL Redis/rediss URL used when backend=redis.
+#   DEPLOYMENT_PROFILE   compat (default) or strict. The hardened container sets
+#                       strict, which requires non-root execution, exact CORS,
+#                       and verified TLS for every configured Redis control plane.
+#   REDIS_REQUIRE_TLS    Require rediss:// + certificate/hostname verification.
+#                       Forced true by DEPLOYMENT_PROFILE=strict.
+#   REQUIRE_NON_ROOT     Reject startup as UID 0. Forced true by strict profile.
+#   SHARE_REQUIRE_DURABLE Fail Share writes closed unless backend reports durable.
+#   SHARE_REQUIRE_SHARED Fail Share writes closed unless backend is shared+authoritative.
+#   TRUST_X_FORWARDED_FOR Trust leftmost X-Forwarded-For only when a known
+#                       ingress proxy strips/overwrites caller-supplied values.
+#   RATE_LIMIT_BACKEND local (default) or redis. Redis is the shared atomic
+#                       consistency domain for horizontally scaled HF replicas.
+#   RATE_LIMIT_REDIS_URL Redis/rediss connection URL used only when backend=redis.
+#   RATE_LIMIT_IDENTITY_SECRET >=32-byte server-only HMAC key. Raw client
+#                       identities are never written to shared Redis keys.
+#   RATE_LIMIT_KEY_PREFIX Optional shared Redis namespace. Default: sphinx-ai-assistant.
+#   RATE_LIMIT_REQUIRE_SHARED When true, local rate limiting is rejected and
+#                       Redis initialization/runtime failure returns HTTP 503.
+#   RATE_LIMIT_REDIS_TIMEOUT_SECONDS Redis operation timeout; clamped 0.25..10 s.
+#   FEEDBACK_PERSIST_ENABLED Persist privacy-minimal consent-gated rating telemetry only. Default false.
+#   CONTRIBUTION_REVIEW_MODE ledger (compatibility) or provider-pr. provider-pr
+#                       stores consented submissions in a native Git/HF review ref;
+#                       only merge into the canonical branch makes them eligible.
+#   CONTRIBUTION_REVIEW_TOKEN Optional operator token for API-driven merge/promotion.
+#                       Native provider UI merge/close remains the preferred review path.
+#   CONTRIBUTION_QUARANTINE_TTL_SECONDS Pending contribution lifetime. Default 86400.
+#   CONTRIBUTION_LEDGER_BACKEND memory (default compatibility) or sqlite.
+#   CONTRIBUTION_LEDGER_SQLITE_PATH SQLite control-plane file when backend=sqlite.
+#   CONTRIBUTION_REQUIRE_DURABLE When true, /v1/contribute fails closed unless a
+#                       durable receipt ledger (currently sqlite) is active.
 
 """
 FastAPI reverse proxy for sphinx-ai-assistant (scikit-plots/ai HF Space).
@@ -104,9 +183,10 @@ Developer note — shared HTTP client
     A single :class:`httpx.AsyncClient` is created during lifespan and
     shared across all requests.  It is created with ``timeout=None`` so
     all timeout control lives in each request's own ``httpx.Timeout``
-    object.  Streaming uses ``client.stream()`` which closes the response
-    body (not the client) on context exit, so concurrent SSE requests are
-    safe.
+    object.  Streaming opens the upstream response with
+    ``build_request(..., timeout=...)`` + ``send(..., stream=True)`` before the
+    downstream status is committed.  The returned response is always closed
+    explicitly, so concurrent SSE requests are safe.
 
 Developer note — explicit error handling
     ``_forward`` catches ``httpx.ReadTimeout``, ``httpx.ConnectTimeout``,
@@ -118,39 +198,181 @@ Developer note — explicit error handling
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import secrets
 import time as _time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from typing import Any
 
 import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
-# _shared_logic.py and _dataset_schema.py must live alongside this file.
+# Private service helpers live in the sibling _utils package.
 try:
-    from ._dataset_schema import (  # type: ignore[import]
-        CONSENT_VERSION_ENABLED,
+    from ._utils._dataset_schema import (  # type: ignore[import]
+        FEEDBACK_TELEMETRY_CONSENT_VERSION,
+        FEEDBACK_TELEMETRY_SCHEMA_VERSION,
+        LEGACY_CONSENT_VERSIONS,
+        MAX_CONTRIBUTION_NOTE_CHARS,
+        MAX_CONVERSATION_MESSAGE_CHARS,
+        MAX_CONVERSATION_MESSAGES,
+        MAX_FEEDBACK_LINEAGE_IDS,
         RESERVED_CONSENT_VERSION,
         normalize_contribution_record,
+        normalize_contribution_withdrawal_record,
         normalize_feedback_record,
+        normalize_feedback_review_record,
     )
 except Exception:  # noqa: BLE001
-    from _dataset_schema import (  # type: ignore[import]
-        CONSENT_VERSION_ENABLED,
+    from _utils._dataset_schema import (  # type: ignore[import]
+        FEEDBACK_TELEMETRY_CONSENT_VERSION,
+        FEEDBACK_TELEMETRY_SCHEMA_VERSION,
+        LEGACY_CONSENT_VERSIONS,
+        MAX_CONTRIBUTION_NOTE_CHARS,
+        MAX_CONVERSATION_MESSAGE_CHARS,
+        MAX_CONVERSATION_MESSAGES,
+        MAX_FEEDBACK_LINEAGE_IDS,
         RESERVED_CONSENT_VERSION,
         normalize_contribution_record,
+        normalize_contribution_withdrawal_record,
         normalize_feedback_record,
+        normalize_feedback_review_record,
     )
 
 try:
-    from ._shared_logic import (  # type: ignore[import]
+    from ._utils._storage import (  # type: ignore[import]
+        StorageConfigError,
+        StorageCoordinator,
+        StorageWriteError,
+        load_storage_targets,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._storage import (  # type: ignore[import]
+        StorageConfigError,
+        StorageCoordinator,
+        StorageWriteError,
+        load_storage_targets,
+    )
+
+try:
+    from ._utils._contribution_ledger import (  # type: ignore[import]
+        ContributionLedgerError,
+        build_contribution_ledger,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._contribution_ledger import (  # type: ignore[import]
+        ContributionLedgerError,
+        build_contribution_ledger,
+    )
+
+try:
+    from ._utils._share_store import (  # type: ignore[import]
+        ShareStoreError,
+        build_share_store,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._share_store import (  # type: ignore[import]
+        ShareStoreError,
+        build_share_store,
+    )
+
+try:
+    from ._utils._rate_limit import (  # type: ignore[import]
+        RateLimitBackendError,
+        RedisRateLimiter,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._rate_limit import (  # type: ignore[import]
+        RateLimitBackendError,
+        RedisRateLimiter,
+    )
+
+try:
+    from ._utils._telemetry import PrivacyJsonFormatter
+except ImportError:  # standalone HF Space deployment
+    from _utils._telemetry import PrivacyJsonFormatter
+
+try:
+    from ._utils._chat_contract import (  # type: ignore[import]
+        CHAT_CONTRACT,
+        MAX_HISTORY_TOTAL_CHARS,
+        MAX_HISTORY_TURN_CHARS,
+        MAX_HISTORY_TURNS,
+        MAX_WORKING_FILE_CHARS,
+        MAX_WORKING_FILE_TOTAL_CHARS,
+        MAX_WORKING_FILES,
+        SUPPORTED_CHAT_CONTRACTS,
+        ChatContractError,
+        build_upstream_payload,
+        encode_upstream_payload,
+        parse_chat_request,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._chat_contract import (  # type: ignore[import]
+        CHAT_CONTRACT,
+        MAX_HISTORY_TOTAL_CHARS,
+        MAX_HISTORY_TURN_CHARS,
+        MAX_HISTORY_TURNS,
+        MAX_WORKING_FILE_CHARS,
+        MAX_WORKING_FILE_TOTAL_CHARS,
+        MAX_WORKING_FILES,
+        SUPPORTED_CHAT_CONTRACTS,
+        ChatContractError,
+        build_upstream_payload,
+        encode_upstream_payload,
+        parse_chat_request,
+    )
+
+try:
+    from ._utils._share_contract import (  # type: ignore[import]
+        ShareValidationError,
+        canonicalize_share_snapshot,
+        generate_edit_token,
+        hash_edit_token,
+        render_share,
+        render_share_viewer_shell,
+        sanitize_share_page_url,
+        share_artifact_filename,
+        valid_share_id,
+        validate_share_format,
+        verify_edit_token,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._share_contract import (  # type: ignore[import]
+        ShareValidationError,
+        canonicalize_share_snapshot,
+        generate_edit_token,
+        hash_edit_token,
+        render_share,
+        render_share_viewer_shell,
+        sanitize_share_page_url,
+        share_artifact_filename,
+        valid_share_id,
+        validate_share_format,
+        verify_edit_token,
+    )
+
+try:
+    from ._utils._resource_contract import resource_summary  # type: ignore[import]
+    from ._utils._resource_transport import (  # type: ignore[import]
+        DEFAULT_MAX_MULTIPART_BYTES,
+        DEFAULT_MAX_RESOURCE_FILE_BYTES,
+        DEFAULT_MAX_RESOURCE_TOTAL_BYTES,
+        ResourceTransportError,
+        ResourceUpload,
+        parse_resource_chat_request,
+    )
+    from ._utils._shared_logic import (  # type: ignore[import]
         DEFAULT_HF_BASE,
+        DEFAULT_HF_PROVIDER_MODELS,
         DEFAULT_HF_SPACES_MODEL_NAMESPACES,
         DEFAULT_HF_SPACES_MODEL_URL,
         DEFAULT_MAX_BODY_BYTES,
@@ -165,13 +387,31 @@ try:
         _resolve_upstream_url,
         _safe_float,
         _safe_int,
-        _token_log_fragment,
+        _validate_credential_destination,
         _validate_env,
         _validate_token_config,
     )
+    from ._utils._stub_model import (  # type: ignore[import]
+        is_stub_model,
+        parse_stub_mode,
+        stub_delay_ms,
+        stub_modes,
+        stub_payload,
+        stub_sse_frames,
+    )
 except Exception:  # noqa: BLE001
-    from _shared_logic import (  # type: ignore[import]
+    from _utils._resource_contract import resource_summary  # type: ignore[import]
+    from _utils._resource_transport import (  # type: ignore[import]
+        DEFAULT_MAX_MULTIPART_BYTES,
+        DEFAULT_MAX_RESOURCE_FILE_BYTES,
+        DEFAULT_MAX_RESOURCE_TOTAL_BYTES,
+        ResourceTransportError,
+        ResourceUpload,
+        parse_resource_chat_request,
+    )
+    from _utils._shared_logic import (  # type: ignore[import]
         DEFAULT_HF_BASE,
+        DEFAULT_HF_PROVIDER_MODELS,
         DEFAULT_HF_SPACES_MODEL_NAMESPACES,
         DEFAULT_HF_SPACES_MODEL_URL,
         DEFAULT_MAX_BODY_BYTES,
@@ -186,9 +426,141 @@ except Exception:  # noqa: BLE001
         _resolve_upstream_url,
         _safe_float,
         _safe_int,
-        _token_log_fragment,
+        _validate_credential_destination,
         _validate_env,
         _validate_token_config,
+    )
+    from _utils._stub_model import (  # type: ignore[import]
+        is_stub_model,
+        parse_stub_mode,
+        stub_delay_ms,
+        stub_modes,
+        stub_payload,
+        stub_sse_frames,
+    )
+
+try:
+    from ._utils._zip_artifact import (  # type: ignore[import]
+        ZIP_EDIT_CONTRACT,
+        ZIP_EDIT_MAX_ENTRY_BYTES,
+        ZIP_EDIT_MAX_REPLACEMENT_TOTAL_BYTES,
+        ZIP_EDIT_MAX_REQUEST_BYTES,
+        ZIP_EDIT_MAX_SOURCE_BYTES,
+        ZIP_EDIT_RECEIPT_CONTRACT,
+        ZipArtifactError,
+        build_zip_edit_artifact,
+        encode_zip_edit_receipt_header,
+        parse_zip_edit_request,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._zip_artifact import (  # type: ignore[import]
+        ZIP_EDIT_CONTRACT,
+        ZIP_EDIT_MAX_ENTRY_BYTES,
+        ZIP_EDIT_MAX_REPLACEMENT_TOTAL_BYTES,
+        ZIP_EDIT_MAX_REQUEST_BYTES,
+        ZIP_EDIT_MAX_SOURCE_BYTES,
+        ZIP_EDIT_RECEIPT_CONTRACT,
+        ZipArtifactError,
+        build_zip_edit_artifact,
+        encode_zip_edit_receipt_header,
+        parse_zip_edit_request,
+    )
+
+try:
+    from ._utils._provider_artifact import (  # type: ignore[import]
+        PROVIDER_ARTIFACT_CONTRACT,
+        PROVIDER_ARTIFACT_MAX_OUTPUT_BYTES,
+        PROVIDER_ARTIFACT_MAX_PROMPT_CHARS,
+        PROVIDER_ARTIFACT_MAX_REQUEST_BYTES,
+        PROVIDER_ARTIFACT_RECEIPT_CONTRACT,
+        ProviderArtifactError,
+        encode_provider_artifact_receipt_header,
+        parse_provider_artifact_request,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._provider_artifact import (  # type: ignore[import]
+        PROVIDER_ARTIFACT_CONTRACT,
+        PROVIDER_ARTIFACT_MAX_OUTPUT_BYTES,
+        PROVIDER_ARTIFACT_MAX_PROMPT_CHARS,
+        PROVIDER_ARTIFACT_MAX_REQUEST_BYTES,
+        PROVIDER_ARTIFACT_RECEIPT_CONTRACT,
+        ProviderArtifactError,
+        encode_provider_artifact_receipt_header,
+        parse_provider_artifact_request,
+    )
+
+try:
+    from ._utils._provider_artifact_lifecycle import (  # type: ignore[import]
+        PROVIDER_ARTIFACT_CANCEL_CONTRACT,
+        PROVIDER_ARTIFACT_CANDIDATE_TTL_SECONDS,
+        PROVIDER_ARTIFACT_DUPLICATE_WINDOW_SECONDS,
+        PROVIDER_ARTIFACT_LIFECYCLE_CONTRACT,
+        build_provider_artifact_lifecycle_registry,
+    )
+except Exception:  # noqa: BLE001
+    from _utils._provider_artifact_lifecycle import (  # type: ignore[import]
+        PROVIDER_ARTIFACT_CANCEL_CONTRACT,
+        PROVIDER_ARTIFACT_CANDIDATE_TTL_SECONDS,
+        PROVIDER_ARTIFACT_DUPLICATE_WINDOW_SECONDS,
+        PROVIDER_ARTIFACT_LIFECYCLE_CONTRACT,
+        build_provider_artifact_lifecycle_registry,
+    )
+
+try:
+    from ._providers import (  # type: ignore[import]
+        AnthropicResourceExecutor,
+        GeminiResourceExecutor,
+        HuggingFaceResourceExecutor,
+        OpenAIProviderArtifactOutputExecutor,
+        OpenAIResourceExecutor,
+        ProviderArtifactOutputRegistry,
+        ProviderExecutorRegistry,
+        ProviderRegistry,
+        ResourceExecutionError,
+        ResourceExecutionSession,
+        StubProviderArtifactOutputExecutor,
+    )
+    from ._providers.anthropic import (  # type: ignore[import]
+        official_anthropic_messages_backend,
+    )
+    from ._providers.gemini import (  # type: ignore[import]
+        official_gemini_interactions_backend,
+    )
+    from ._providers.huggingface import (  # type: ignore[import]
+        official_huggingface_router_base,
+    )
+    from ._providers.openai import official_openai_chat_backend  # type: ignore[import]
+    from ._providers.policy import (  # type: ignore[import]
+        ModelResourceOverride,
+        provider_names,
+    )
+except Exception:  # noqa: BLE001
+    from _providers import (  # type: ignore[import]
+        AnthropicResourceExecutor,
+        GeminiResourceExecutor,
+        HuggingFaceResourceExecutor,
+        OpenAIProviderArtifactOutputExecutor,
+        OpenAIResourceExecutor,
+        ProviderArtifactOutputRegistry,
+        ProviderExecutorRegistry,
+        ProviderRegistry,
+        ResourceExecutionError,
+        ResourceExecutionSession,
+        StubProviderArtifactOutputExecutor,
+    )
+    from _providers.anthropic import (  # type: ignore[import]
+        official_anthropic_messages_backend,
+    )
+    from _providers.gemini import (  # type: ignore[import]
+        official_gemini_interactions_backend,
+    )
+    from _providers.huggingface import (  # type: ignore[import]
+        official_huggingface_router_base,
+    )
+    from _providers.openai import official_openai_chat_backend  # type: ignore[import]
+    from _providers.policy import (  # type: ignore[import]
+        ModelResourceOverride,
+        provider_names,
     )
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -211,17 +583,279 @@ def _client_ip(request: Request) -> str:
 
     Notes
     -----
-    Developer: HF Spaces sits behind a proxy so ``request.client.host``
-    is the proxy IP, not the user IP.  ``X-Forwarded-For`` is the correct
-    source — take the FIRST value only (leftmost = original client;
-    rightmost values can be spoofed by intermediaries).
+    Developer: default to the direct ASGI peer address.  A deployment may opt
+    into leftmost ``X-Forwarded-For`` only when a known ingress strips and
+    overwrites caller-supplied forwarding headers.  The boolean is a trust
+    declaration, not a way to make an arbitrary forwarded header trustworthy.
     """
-    xff = request.headers.get("x-forwarded-for", "")
-    if xff:
-        return xff.split(",")[0].strip()
+    # Forwarded identity is accepted only when the deployment explicitly says
+    # its ingress overwrites the header.  Otherwise a direct caller can forge
+    # X-Forwarded-For and rotate rate-limit identities at will.
+    if globals().get("TRUST_X_FORWARDED_FOR", False):
+        xff = request.headers.get("x-forwarded-for", "")
+        if xff:
+            return xff.split(",")[0].strip()
     if request.client:
         return request.client.host or "unknown"
     return "unknown"
+
+
+def _opaque_share_request_mode(request: Request) -> str:
+    """Classify an opaque-origin Share request as ``read``, ``write`` or ``none``.
+
+    ``Origin: null`` is shared by legitimate ``file://`` pages and hostile
+    sandboxed opaque documents, so compatibility is deliberately route/method
+    scoped.  Browser preflights are classified using
+    ``Access-Control-Request-Method`` rather than the OPTIONS method itself.
+    """
+    path = request.url.path
+    if path != "/v1/share" and not path.startswith("/v1/share/"):
+        return "none"
+    method = request.method.upper()
+    if method == "OPTIONS":
+        method = (
+            request.headers.get("access-control-request-method", "").strip().upper()
+        )
+    if path == "/v1/share" and method in {"GET", "HEAD"}:
+        return "read"
+    if path in {"/v1/share/read", "/v1/share/download"} and method == "POST":
+        return "read"
+    if path.startswith("/v1/share/") and method in {"GET", "HEAD"}:
+        return "read"
+    return "write"
+
+
+def _origin_allowed(  # ruff: ignore[too-many-return-statements]
+    request: Request,
+) -> bool:
+    """Return whether a browser-supplied Origin is allowed for this service.
+
+    Missing Origin is accepted for server-to-server/curl traffic.  Origin is a
+    browser abuse boundary only; it is never treated as authentication.
+
+    ``Origin: null`` read compatibility and mutation authority are separate.
+    The broad write opt-in never works by itself: read compatibility must also
+    be explicitly enabled, and strict deployments reject opaque-origin writes.
+    """
+    raw_origin = request.headers.get("origin", "").strip()
+    if not raw_origin:
+        return True
+    if raw_origin == "null":
+        mode = _opaque_share_request_mode(request)
+        if mode == "read":
+            return SHARE_ALLOW_OPAQUE_ORIGIN
+        if mode == "write":
+            return bool(SHARE_ALLOW_OPAQUE_ORIGIN and SHARE_ALLOW_OPAQUE_ORIGIN_WRITE)
+        return False
+    origin = _normalise_browser_origin(raw_origin)
+    if not origin:
+        return False
+    if _allowed_origins == ["*"] or origin in _allowed_origins:
+        return True
+    # Same-origin browser requests remain usable even when the public host is
+    # reverse-proxied and therefore is not listed in ALLOWED_ORIGINS.
+    host = request.headers.get("host", "").strip().lower()
+    if host:
+        try:
+            from urllib.parse import urlsplit  # ruff: ignore[import-outside-top-level]
+
+            parsed = urlsplit(origin)
+            if parsed.scheme in {"http", "https"} and parsed.netloc.lower() == host:
+                return True
+        except ValueError:
+            pass
+    return False
+
+
+class _UpstreamResponseTooLarge(  # ruff: ignore[error-suffix-on-exception-name]
+    RuntimeError,
+):
+    """Raised when decoded upstream response bytes exceed the hard application cap."""
+
+
+def _upstream_declared_length(response: httpx.Response) -> int | None:
+    raw = (response.headers.get("content-length") or "").strip()
+    if not raw:
+        return None
+    if not raw.isdigit():
+        raise _UpstreamResponseTooLarge("invalid upstream content-length")
+    value = int(raw)
+    if value < 0:
+        raise _UpstreamResponseTooLarge("invalid upstream content-length")
+    return value
+
+
+def _check_upstream_declared_length(
+    response: httpx.Response, max_bytes: int | None = None
+) -> None:
+    limit = MAX_UPSTREAM_RESPONSE_BYTES if max_bytes is None else int(max_bytes)
+    declared = _upstream_declared_length(response)
+    if declared is not None and declared > limit:
+        raise _UpstreamResponseTooLarge("declared upstream response too large")
+
+
+async def _read_upstream_limited(
+    response: httpx.Response, max_bytes: int | None = None
+) -> bytes:
+    """Read a streamed upstream response with a decoded-byte hard ceiling."""
+    limit = MAX_UPSTREAM_RESPONSE_BYTES if max_bytes is None else int(max_bytes)
+    _check_upstream_declared_length(response, limit)
+    out = bytearray()
+    total = 0
+    async for chunk in response.aiter_bytes():
+        if not chunk:
+            continue
+        total += len(chunk)
+        if total > limit:
+            raise _UpstreamResponseTooLarge("upstream response too large")
+        out.extend(chunk)
+    return bytes(out)
+
+
+async def _read_limited_body(
+    request: Request, max_bytes: int, label: str = "Request"
+) -> bytes:
+    """Read an ASGI request incrementally and stop once *max_bytes* is crossed."""
+    raw_cl = request.headers.get("content-length")
+    if raw_cl not in (None, ""):
+        try:
+            content_length = int(raw_cl)
+        except (TypeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=400, detail="Invalid Content-Length header."
+            ) from exc
+        if content_length < 0:
+            raise HTTPException(
+                status_code=400, detail="Invalid Content-Length header."
+            )
+        if content_length > max_bytes:
+            raise HTTPException(status_code=413, detail=f"{label} body too large.")
+
+    body = bytearray()
+    async for chunk in request.stream():
+        if not chunk:
+            continue
+        if len(body) + len(chunk) > max_bytes:
+            raise HTTPException(status_code=413, detail=f"{label} body too large.")
+        body.extend(chunk)
+    return bytes(body)
+
+
+async def _consume_rate_limit(
+    store: dict[str, tuple[int, float]],
+    lock: asyncio.Lock,
+    identity: str,
+    *,
+    limit: int,
+    window_seconds: int = 3600,
+    scope: str = "generic",
+) -> tuple[bool, int]:
+    """Consume one rate slot from the configured control plane.
+
+    ``local`` mode preserves the bounded process-local abuse gate. ``redis``
+    mode is fail-closed: a configured shared limiter that is unavailable never
+    silently falls back to per-process counters, because that would split one
+    advertised quota into independent replica-local windows.
+    """
+    if RATE_LIMIT_REQUIRE_SHARED and RATE_LIMIT_BACKEND == "local":
+        raise HTTPException(
+            status_code=503, detail="Shared rate limiter required by deployment policy."
+        )
+    if RATE_LIMIT_BACKEND != "local":
+        if (
+            _RATE_LIMIT_CONFIG_ERROR
+            or _SHARED_RATE_LIMITER is None
+            or not _SHARED_RATE_LIMITER_READY
+        ):
+            raise HTTPException(
+                status_code=503, detail="Shared rate limiter unavailable."
+            )
+        try:
+            allowed, count, _retry_after = await _SHARED_RATE_LIMITER.consume(
+                identity, scope=scope, limit=limit, window_seconds=window_seconds
+            )
+            return allowed, count
+        except RateLimitBackendError as exc:
+            logger.error(
+                "Shared rate limiter failure: code=%s scope=%s", exc.code, scope
+            )
+            raise HTTPException(
+                status_code=503, detail="Shared rate limiter unavailable."
+            ) from exc
+
+    now = _time.time()
+    async with lock:
+        cutoff = now - window_seconds
+        stale = [key for key, (_count, started) in store.items() if started <= cutoff]
+        for key in stale:
+            store.pop(key, None)
+
+        if identity not in store and len(store) >= _MAX_RL_ENTRIES:
+            # Fail closed rather than adding another attacker-controlled key.
+            return False, 0
+
+        count, window_start = store.get(identity, (0, now))
+        if now - window_start >= window_seconds:
+            count, window_start = 0, now
+        count += 1
+        store[identity] = (count, window_start)
+        return count <= limit, count
+
+
+def _hf_space_public_base() -> str:
+    """Return the deployment-owned public HF Space origin, if available.
+
+    Hugging Face injects ``SPACE_HOST`` into Spaces.  Treat it as a hostname,
+    never as a free-form URL, and accept only the platform ``*.hf.space``
+    namespace.  This lets a Docker Space whose ASGI scope is internally HTTP
+    mint the externally correct HTTPS Share URL without trusting caller-supplied
+    forwarding headers.
+    """
+    raw = str(SPACE_HOST or "").strip().lower().rstrip(".")
+    if not raw or any(ch in raw for ch in ("/", "\\", "?", "#", "@")) or ":" in raw:
+        return ""
+    if not raw.endswith(".hf.space") or raw == ".hf.space":
+        return ""
+    return f"https://{raw}"
+
+
+def _share_public_base(request: Request) -> str:
+    """Return the externally safe base URL used in public Share links.
+
+    Precedence is explicit operator configuration, then Hugging Face's
+    deployment-owned ``SPACE_HOST``, then the ASGI request base.  An explicit
+    HTTP URL is upgraded only when it names this same HF Space; arbitrary
+    remote HTTP bases remain an error.
+    """
+    space_base = _hf_space_public_base()
+    candidate = SHARE_PUBLIC_BASE_URL or space_base or str(request.base_url)
+    safe = sanitize_share_page_url(candidate).rstrip("/")
+    if not safe:
+        raise HTTPException(status_code=500, detail="Share public base URL is invalid.")
+
+    if safe.startswith("http://"):
+        from urllib.parse import (  # ruff: ignore[import-outside-top-level]
+            urlsplit,
+            urlunsplit,
+        )
+
+        parsed = urlsplit(safe)
+        host = (parsed.hostname or "").lower()
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            return safe
+
+        # Common HF Docker deployment mistake: SHARE_PUBLIC_BASE_URL was set to
+        # the public Space hostname but with http:// because the internal
+        # container listener is HTTP.  SPACE_HOST is deployment-owned evidence
+        # that the same hostname is externally HTTPS, so upgrade only this exact
+        # case instead of trusting X-Forwarded-* from arbitrary callers.
+        if space_base and host == space_base.removeprefix("https://"):
+            return urlunsplit(("https", parsed.netloc, parsed.path, "", "")).rstrip("/")
+
+        raise HTTPException(
+            status_code=500, detail="Share public base URL must use HTTPS."
+        )
+    return safe
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -229,39 +863,12 @@ def _client_ip(request: Request) -> str:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-class _StructuredFormatter(logging.Formatter):
-    """Emit one JSON object per log record to stdout.
-
-    Parameters
-    ----------
-    *args, **kwargs
-        Forwarded to :class:`logging.Formatter`.
-
-    Notes
-    -----
-    Developer: JSON format is required for machine-parseable log ingestion
-    (HF Spaces log export, Datadog, etc.).  Text-format lines require regex
-    in log queries; JSON fields are natively queryable.
-
-    The ``exc_info`` key is omitted entirely when no exception is attached
-    so log consumers do not need to handle a null field on every record.
-    """
-
-    def format(self, record: logging.LogRecord) -> str:  # noqa: A003
-        payload: dict = {
-            "ts": self.formatTime(record, datefmt="%Y-%m-%dT%H:%M:%S"),
-            "level": record.levelname,
-            "logger": record.name,
-            "event": record.getMessage(),
-        }
-        if record.exc_info:
-            payload["exc_info"] = self.formatException(record.exc_info)
-        return json.dumps(payload, ensure_ascii=False)
-
-
+# Privacy-safe structured formatter shared with the direct model service.
+# Exception tracebacks are reduced to bounded filename/function/line metadata
+# and all messages pass the same high-confidence secret/URL redactor.
 _handler = logging.StreamHandler()
-_handler.setFormatter(_StructuredFormatter())
-_handler.addFilter(_RedactingFilter())  # scrub tokens/IPs before emission
+_handler.setFormatter(PrivacyJsonFormatter())
+_handler.addFilter(_RedactingFilter())
 logging.root.handlers = [_handler]
 logging.root.setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
@@ -274,22 +881,96 @@ logger = logging.getLogger(__name__)
 #: Explicit custom backend URL (Path 1).
 BACKEND_URL: str = os.environ.get("BACKEND_URL", "").strip()
 
+#: Resource adapter used only when Path 1 (BACKEND_URL) wins. Provider identity
+#: must come from the configured upstream path, never from the model namespace.
+BACKEND_RESOURCE_ADAPTER: str = (
+    os.environ.get("BACKEND_RESOURCE_ADAPTER", "custom").strip().lower() or "custom"
+)
+if BACKEND_RESOURCE_ADAPTER not in set(provider_names()):
+    raise RuntimeError("BACKEND_RESOURCE_ADAPTER is not a supported resource adapter")
+
+
+_raw_provider_artifact_output_adapters = tuple(
+    dict.fromkeys(
+        row.strip().lower()
+        for row in os.environ.get("PROVIDER_ARTIFACT_OUTPUT_ADAPTERS", "").split(",")
+        if row.strip()
+    )
+)
+_unsupported_provider_artifact_output_adapters = set(
+    _raw_provider_artifact_output_adapters
+) - {"openai"}
+if _unsupported_provider_artifact_output_adapters:
+    raise RuntimeError(
+        "PROVIDER_ARTIFACT_OUTPUT_ADAPTERS contains an unsupported output adapter"
+    )
+PROVIDER_ARTIFACT_OUTPUT_ADAPTERS: tuple[str, ...] = (
+    _raw_provider_artifact_output_adapters
+)
+
+#: Dedicated Path-1 bearer token. Never reuse HF_TOKEN for custom backends.
+BACKEND_AUTH_TOKEN: str = os.environ.get("BACKEND_AUTH_TOKEN", "").strip()
+PROVIDER_ARTIFACT_OPENAI_TOKEN: str = os.environ.get(
+    "PROVIDER_ARTIFACT_OPENAI_TOKEN", ""
+).strip()
+
+PROVIDER_ARTIFACT_LIFECYCLE_BACKEND: str = (
+    os.environ.get("PROVIDER_ARTIFACT_LIFECYCLE_BACKEND", "memory").strip().lower()
+    or "memory"
+)
+PROVIDER_ARTIFACT_LIFECYCLE_REDIS_URL: str = os.environ.get(
+    "PROVIDER_ARTIFACT_LIFECYCLE_REDIS_URL", ""
+).strip()
+PROVIDER_ARTIFACT_LIFECYCLE_KEY_PREFIX: str = (
+    os.environ.get(
+        "PROVIDER_ARTIFACT_LIFECYCLE_KEY_PREFIX", "sphinx-ai-assistant"
+    ).strip()
+    or "sphinx-ai-assistant"
+)
+try:
+    _raw_provider_artifact_lifecycle_redis_timeout = float(
+        os.environ.get("PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TIMEOUT_SECONDS", "2") or 2
+    )
+except (TypeError, ValueError):
+    _raw_provider_artifact_lifecycle_redis_timeout = 2.0
+PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TIMEOUT_SECONDS: float = max(
+    0.25, min(10.0, _raw_provider_artifact_lifecycle_redis_timeout)
+)
+PROVIDER_ARTIFACT_LIFECYCLE_REQUIRE_SHARED: bool = os.environ.get(
+    "PROVIDER_ARTIFACT_LIFECYCLE_REQUIRE_SHARED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TOPOLOGY: str = (
+    os.environ.get("PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TOPOLOGY", "standalone")
+    .strip()
+    .lower()
+    or "standalone"
+)
+if PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TOPOLOGY not in {"standalone", "cluster"}:
+    raise RuntimeError(
+        "PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TOPOLOGY must be standalone or cluster"
+    )
+
+#: Dedicated Path-2 bearer token bound to HF_SPACES_MODEL_URL.
+HF_SPACES_AUTH_TOKEN: str = os.environ.get("HF_SPACES_AUTH_TOKEN", "").strip()
+
 #: HuggingFace API token for **inference** (read-only).
-#: Required for Path 3 (HF Serverless API); optional for Path 2.
+#: Required for Path 3 (HF Serverless API). Never used for Paths 1 or 2.
 #: Use a read-only / ``inference-api``-scoped fine-grained token here.
 #: This token is forwarded to upstream model backends and must not carry
 #: unnecessary write permission — see ``HF_WRITE_TOKEN`` below.
 HF_TOKEN: str = os.environ.get("HF_TOKEN", "").strip()
 
-#: HuggingFace write-scoped token for dataset push operations.
+#: Historical HuggingFace dataset-token alias. New deployments should prefer
+#: ``HF_DATASET_TOKEN`` below. Despite this variable's old name, a repo-scoped
+#: fine-grained token is valid and preferred; a classic ``write`` token is not
+#: required.
 #:
 #: Separation of concerns (principle of least privilege):
 #:
-#: * ``HF_TOKEN``       — read / inference-api scope.
-#:                        Injected into every upstream inference request.
-#: * ``HF_WRITE_TOKEN`` — write scope, scoped to the training dataset repo only.
-#:                        Used exclusively by ``HfApi.create_commit`` inside
-#:                        ``POST /v1/contribute``.  Never forwarded to models.
+#: * ``HF_TOKEN``         — read / inference-api scope.
+#:                          Injected into upstream inference requests.
+#: * ``HF_DATASET_TOKEN`` — dataset-repo write capability only (preferred).
+#: * ``HF_WRITE_TOKEN``   — backward-compatible alias for dataset writes.
 #:
 #: How to create each token on HuggingFace
 #: ----------------------------------------
@@ -300,7 +981,7 @@ HF_TOKEN: str = os.environ.get("HF_TOKEN", "").strip()
 #:   Permissions: ``Make calls to the serverless Inference API``
 #:   (Do NOT grant any repo write access)
 #:
-#: Write token (``HF_WRITE_TOKEN``)
+#: Dataset token (``HF_DATASET_TOKEN``; preferred)
 #:   Type: Fine-grained
 #:   Permissions: ``Write access`` scoped to
 #:   ``scikit-plots/ai-assistant-contributions`` (or your dataset repo)
@@ -308,18 +989,25 @@ HF_TOKEN: str = os.environ.get("HF_TOKEN", "").strip()
 #:
 #: Classic tokens (legacy, less secure than fine-grained):
 #:   ``read`` role  → ``HF_TOKEN``       (inference only)
-#:   ``write`` role → ``HF_WRITE_TOKEN`` (dataset push)
+#:   ``write`` role → ``HF_DATASET_TOKEN`` or legacy ``HF_WRITE_TOKEN``
 #:
 #: Fallback behaviour
 #: ------------------
-#: When ``HF_WRITE_TOKEN`` is not set, ``HF_DATASET_TOKEN`` falls back to
-#: ``HF_TOKEN`` so single-token deployments keep working without changes.
+#: If the preferred ``HF_DATASET_TOKEN`` is absent, the proxy tries legacy
+#: ``HF_WRITE_TOKEN`` and finally ``HF_TOKEN`` so existing deployments remain
+#: compatible.
 HF_WRITE_TOKEN: str = os.environ.get("HF_WRITE_TOKEN", "").strip()
 
+#: Preferred neutral dataset-persistence secret. Unlike the historical name
+#: ``HF_WRITE_TOKEN``, this does not imply the classic Hugging Face ``write``
+#: role: a repo-scoped fine-grained token is preferred for production.
+HF_DATASET_TOKEN_EXPLICIT: str = os.environ.get("HF_DATASET_TOKEN", "").strip()
+
 #: Effective token used **only** for HuggingFace dataset write operations.
-#: Resolves to ``HF_WRITE_TOKEN`` when set; falls back to ``HF_TOKEN`` when not.
-#: Never forward this token to model inference backends.
-HF_DATASET_TOKEN: str = HF_WRITE_TOKEN or HF_TOKEN
+#: Priority: HF_DATASET_TOKEN (preferred) -> HF_WRITE_TOKEN (legacy alias) ->
+#: HF_TOKEN (single-token compatibility fallback). Never forward this token to
+#: model inference backends.
+HF_DATASET_TOKEN: str = HF_DATASET_TOKEN_EXPLICIT or HF_WRITE_TOKEN or HF_TOKEN
 
 #: Classified type for HF_TOKEN — used by startup validation and log output.
 #:
@@ -344,8 +1032,38 @@ HF_WRITE_TOKEN_TYPE: str = _classify_token_type(
     declared_type=os.environ.get("HF_WRITE_TOKEN_TYPE"),
 )
 
+#: Classified type for the effective dataset token.
+#: ``HF_DATASET_TOKEN_TYPE`` is preferred when HF_DATASET_TOKEN is set; legacy
+#: aliases inherit their existing type declaration.
+HF_DATASET_TOKEN_TYPE: str = (
+    _classify_token_type(
+        HF_DATASET_TOKEN_EXPLICIT,
+        declared_type=os.environ.get("HF_DATASET_TOKEN_TYPE"),
+    )
+    if HF_DATASET_TOKEN_EXPLICIT
+    else (HF_WRITE_TOKEN_TYPE if HF_WRITE_TOKEN else HF_TOKEN_TYPE)
+)
+
 #: HF Serverless Inference API base URL (no trailing slash).
 HF_BASE: str = os.environ.get("HF_BASE", DEFAULT_HF_BASE).rstrip("/")
+
+#: Exact additional Path-3 Chat Completion VLMs allowed to receive raw raster
+#: images through the reviewed HF VLM executor.  This is an exact allowlist;
+#: provider/model-name heuristics never grant image authority.
+HF_RESOURCE_VLM_MODELS: tuple[str, ...] = tuple(
+    row.strip()
+    for row in os.environ.get("HF_RESOURCE_VLM_MODELS", "").split(",")
+    if row.strip()
+)
+HF_RESOURCE_ASR_MODELS: tuple[str, ...] = tuple(
+    row.strip()
+    for row in os.environ.get("HF_RESOURCE_ASR_MODELS", "").split(",")
+    if row.strip()
+)
+if set(HF_RESOURCE_VLM_MODELS) & set(HF_RESOURCE_ASR_MODELS):
+    raise RuntimeError(
+        "HF_RESOURCE_VLM_MODELS and HF_RESOURCE_ASR_MODELS must not overlap"
+    )
 
 #: Fallback model when request body omits ``model``.
 DEFAULT_MODEL = os.environ.get("DEFAULT_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL
@@ -365,11 +1083,449 @@ HF_SPACES_MODEL_NAMESPACES: tuple[str, ...] = (
     or DEFAULT_HF_SPACES_MODEL_NAMESPACES
 )
 
-#: Maximum accepted request body size (bytes).
-MAX_BODY_BYTES: int = _safe_int(
-    os.environ.get("MAX_BODY_BYTES"),
-    DEFAULT_MAX_BODY_BYTES,
+#: Exact provider models this proxy will route. Namespaced Path-2 models are
+#: separately allowed by HF_SPACES_MODEL_NAMESPACES.
+_DEFAULT_ALLOWED_MODELS: tuple[str, ...] = tuple(
+    dict.fromkeys((DEFAULT_MODEL, *DEFAULT_HF_PROVIDER_MODELS))
 )
+_raw_allowed_models = os.environ.get(
+    "ALLOWED_MODELS", ",".join(_DEFAULT_ALLOWED_MODELS)
+)
+ALLOWED_MODELS: tuple[str, ...] = (
+    tuple(dict.fromkeys(m.strip() for m in _raw_allowed_models.split(",") if m.strip()))
+    or _DEFAULT_ALLOWED_MODELS
+)
+
+#: Maximum accepted request body size (bytes).
+MAX_BODY_BYTES: int = max(
+    16_384,
+    min(
+        _safe_int(os.environ.get("MAX_BODY_BYTES"), DEFAULT_MAX_BODY_BYTES),
+        16 * 1024 * 1024,
+    ),
+)
+
+#: First-class resource transport limits. Uploads are streamed/spooled; these
+#: ceilings protect disk/network/process resources independently of the small
+#: JSON-only chat envelope. Deployments may narrow but never widen the hard caps.
+RESOURCE_MAX_FILE_BYTES: int = max(
+    1024 * 1024,
+    min(
+        _safe_int(
+            os.environ.get("RESOURCE_MAX_FILE_BYTES"), DEFAULT_MAX_RESOURCE_FILE_BYTES
+        ),
+        2 * 1024 * 1024 * 1024,
+    ),
+)
+RESOURCE_MAX_TOTAL_BYTES: int = max(
+    RESOURCE_MAX_FILE_BYTES,
+    min(
+        _safe_int(
+            os.environ.get("RESOURCE_MAX_TOTAL_BYTES"), DEFAULT_MAX_RESOURCE_TOTAL_BYTES
+        ),
+        4 * 1024 * 1024 * 1024,
+    ),
+)
+RESOURCE_MAX_REQUEST_BYTES: int = max(
+    RESOURCE_MAX_TOTAL_BYTES + 64 * 1024,
+    min(
+        _safe_int(
+            os.environ.get("RESOURCE_MAX_REQUEST_BYTES"), DEFAULT_MAX_MULTIPART_BYTES
+        ),
+        4 * 1024 * 1024 * 1024 + 2 * 1024 * 1024,
+    ),
+)
+
+_HF_RESOURCE_OVERRIDES = {
+    model: ModelResourceOverride(
+        adapter="huggingface", routes={"text": ("context",), "image": ("native",)}
+    )
+    for model in HF_RESOURCE_VLM_MODELS
+}
+_HF_RESOURCE_OVERRIDES.update(
+    {
+        model: ModelResourceOverride(
+            adapter="huggingface", routes={"audio": ("native",)}
+        )
+        for model in HF_RESOURCE_ASR_MODELS
+    }
+)
+_RESOURCE_PROVIDER_REGISTRY = ProviderRegistry(
+    overrides=_HF_RESOURCE_OVERRIDES,
+    max_files=256,
+    max_file_bytes=RESOURCE_MAX_FILE_BYTES,
+    max_total_bytes=RESOURCE_MAX_TOTAL_BYTES,
+)
+
+# Planning and execution are intentionally separate authorities. Adding a
+# provider capability never enables provider I/O by itself. Credential-bearing
+# executors register explicitly only when deployment authority enables a verified implementation.
+_RESOURCE_EXECUTOR_REGISTRY = ProviderExecutorRegistry(provider_names())
+# Binary output generation is a separate authority from chat/resource input.
+_PROVIDER_ARTIFACT_OUTPUT_REGISTRY = ProviderArtifactOutputRegistry()
+_PROVIDER_ARTIFACT_LIFECYCLE = None  # configured after Redis transport policy is known
+
+
+def _openai_resource_executor_configured() -> bool:
+    """Return whether this deployment grants the official OpenAI resource executor."""
+    return bool(
+        BACKEND_RESOURCE_ADAPTER == "openai"
+        and BACKEND_AUTH_TOKEN
+        and official_openai_chat_backend(BACKEND_URL)
+    )
+
+
+def _openai_provider_artifact_output_configured() -> bool:
+    """Return whether this deployment explicitly enables OpenAI binary output."""
+    return bool(
+        "openai" in PROVIDER_ARTIFACT_OUTPUT_ADAPTERS
+        and BACKEND_RESOURCE_ADAPTER == "openai"
+        and official_openai_chat_backend(BACKEND_URL)
+        and PROVIDER_ARTIFACT_OPENAI_TOKEN
+    )
+
+
+def _anthropic_resource_executor_configured() -> bool:
+    """Return whether this deployment grants the official Anthropic executor."""
+    return bool(
+        BACKEND_RESOURCE_ADAPTER == "anthropic"
+        and BACKEND_AUTH_TOKEN
+        and official_anthropic_messages_backend(BACKEND_URL)
+    )
+
+
+def _gemini_resource_executor_configured() -> bool:
+    """Return whether this deployment grants the official Gemini executor."""
+    return bool(
+        BACKEND_RESOURCE_ADAPTER == "gemini"
+        and BACKEND_AUTH_TOKEN
+        and official_gemini_interactions_backend(BACKEND_URL)
+    )
+
+
+def _huggingface_resource_executor_configured() -> bool:
+    """Return whether Path-3 grants the official HF Chat/VLM executor."""
+    return bool(
+        not BACKEND_URL and HF_TOKEN and official_huggingface_router_base(HF_BASE)
+    )
+
+
+def _configure_resource_executors(client: httpx.AsyncClient) -> None:
+    """Register credential-bearing executors from explicit deployment authority only."""
+    _RESOURCE_EXECUTOR_REGISTRY.unregister("openai")
+    _RESOURCE_EXECUTOR_REGISTRY.unregister("anthropic")
+    _RESOURCE_EXECUTOR_REGISTRY.unregister("gemini")
+    _RESOURCE_EXECUTOR_REGISTRY.unregister("huggingface")
+    if _openai_resource_executor_configured():
+        _RESOURCE_EXECUTOR_REGISTRY.register(
+            "openai",
+            OpenAIResourceExecutor(
+                api_key=BACKEND_AUTH_TOKEN,
+                client=client,
+                response_timeout_seconds=_proxy_timeout_secs,
+            ),
+        )
+    if _anthropic_resource_executor_configured():
+        _RESOURCE_EXECUTOR_REGISTRY.register(
+            "anthropic",
+            AnthropicResourceExecutor(
+                api_key=BACKEND_AUTH_TOKEN,
+                client=client,
+                response_timeout_seconds=_proxy_timeout_secs,
+            ),
+        )
+    if _gemini_resource_executor_configured():
+        _RESOURCE_EXECUTOR_REGISTRY.register(
+            "gemini",
+            GeminiResourceExecutor(
+                api_key=BACKEND_AUTH_TOKEN,
+                client=client,
+                response_timeout_seconds=_proxy_timeout_secs,
+            ),
+        )
+    if _huggingface_resource_executor_configured():
+        _RESOURCE_EXECUTOR_REGISTRY.register(
+            "huggingface",
+            HuggingFaceResourceExecutor(
+                api_key=HF_TOKEN,
+                client=client,
+                base_url=HF_BASE,
+                response_timeout_seconds=_path3_timeout_secs,
+                vlm_models=HF_RESOURCE_VLM_MODELS,
+                asr_models=HF_RESOURCE_ASR_MODELS,
+            ),
+        )
+
+
+def _configure_provider_artifact_outputs(client: httpx.AsyncClient) -> None:
+    """Register only explicitly authorized binary-output generators."""
+    _PROVIDER_ARTIFACT_OUTPUT_REGISTRY.clear()
+    if STUB_ENABLED:
+        _PROVIDER_ARTIFACT_OUTPUT_REGISTRY.register(
+            StubProviderArtifactOutputExecutor()
+        )
+    # Production generation requires a second, explicit output-plane opt-in in
+    # addition to exact provider/backend/credential authority. Configuring chat
+    # or raw-resource input must never silently enable a paid binary generator.
+    if _openai_provider_artifact_output_configured():
+        _PROVIDER_ARTIFACT_OUTPUT_REGISTRY.register(
+            OpenAIProviderArtifactOutputExecutor(
+                api_key=PROVIDER_ARTIFACT_OPENAI_TOKEN,
+                client=client,
+                timeout_seconds=_proxy_timeout_secs,
+            )
+        )
+
+
+def _resource_adapter_name_for_model(model: str) -> str:
+    """Return the resource adapter matching the actual upstream routing path."""
+    if BACKEND_URL:
+        return BACKEND_RESOURCE_ADAPTER
+    owner = str(model or "").split("/", 1)[0]
+    if HF_SPACES_MODEL_URL and owner in set(HF_SPACES_MODEL_NAMESPACES):
+        return "self_hosted"
+    return "huggingface"
+
+
+def _sanitize_public_route_constraint(spec: object) -> dict[str, Any]:
+    """Return the tiny non-secret subset allowed in browser route constraints.
+
+    Executor objects are trusted server code, but capability documents are a
+    public boundary.  Future adapters must therefore be unable to leak opaque
+    provider IDs, credentials, URLs, or arbitrary metadata merely by adding a
+    field to ``route_constraints()``.
+    """
+    if not isinstance(spec, dict):
+        return {}
+    out: dict[str, Any] = {}
+    value = spec.get("max_files")
+    if value is not None:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = 0
+        if 1 <= number <= 256:  # ruff: ignore[magic-value-comparison]
+            out["max_files"] = number
+    value = spec.get("max_file_bytes")
+    if value is not None:
+        try:
+            number = int(value)
+        except (TypeError, ValueError):
+            number = 0
+        if 1 <= number <= 2 * 1024 * 1024 * 1024:
+            out["max_file_bytes"] = number
+    raw_mimes = spec.get("mime_types")
+    if isinstance(raw_mimes, (list, tuple)):
+        safe: list[str] = []
+        allowed = frozenset(
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!#$&^_.+*-/"
+        )
+        for raw in raw_mimes[:64]:
+            mime = str(raw or "").strip().lower()
+            if (
+                3 <= len(mime) <= 161  # ruff: ignore[magic-value-comparison]
+                and mime.count("/") == 1
+                and not mime.startswith("/")
+                and not mime.endswith("/")
+                and all(ch in allowed for ch in mime)
+                and mime not in safe
+            ):
+                safe.append(mime)
+        if safe:
+            out["mime_types"] = safe
+    return out
+
+
+def _resource_capability_doc(model: str) -> dict[str, Any]:
+    """Return non-secret resource routes for one already-authorized model id."""
+    if model == "stub/mirror" and STUB_ENABLED:
+        # Mirror terminates at this proxy and can inspect every verified resource
+        # without forwarding provider bytes, so its diagnostic executor is real.
+        return {
+            "adapter": "stub-mirror",
+            "execution": "enabled",
+            "routes": {
+                modality: ["tool"]
+                for modality in (
+                    "text",
+                    "image",
+                    "animated_image",
+                    "vector_image",
+                    "audio",
+                    "video",
+                    "document",
+                    "archive",
+                    "data",
+                    "binary",
+                )
+            },
+        }
+    adapter_name = _resource_adapter_name_for_model(model)
+    caps = _RESOURCE_PROVIDER_REGISTRY.get(adapter_name).capabilities(model)
+    execution = _RESOURCE_EXECUTOR_REGISTRY.execution_state(adapter_name)
+    routes = {k: list(v) for k, v in sorted(caps.modality_routes.items())}
+    route_constraints: dict[str, Any] = {}
+    if execution == "enabled":
+        executor = _RESOURCE_EXECUTOR_REGISTRY.get(adapter_name)
+        executable = (
+            executor.executable_routes(model)
+            if callable(getattr(executor, "executable_routes", None))
+            else {}
+        )
+        filtered: dict[str, list[str]] = {}
+        for modality, planned in routes.items():
+            allowed = set(executable.get(modality, ()))
+            # ``context`` is a browser/proxy text-plane capability and does not
+            # require provider raw-file execution.  Extract/tool/native do.
+            kept = [
+                route for route in planned if route == "context" or route in allowed
+            ]
+            filtered[modality] = kept or ["unsupported"]
+        routes = filtered
+        constraint_fn = getattr(executor, "route_constraints", None)
+        if callable(constraint_fn):
+            raw_constraints = constraint_fn(model)
+            if isinstance(raw_constraints, dict):
+                # Executor-generated, non-secret data. Keep only constraints for
+                # routes that survived the execution intersection so health
+                # cannot advertise limits for an unavailable facility.
+                for modality, route_rows in raw_constraints.items():
+                    if modality not in routes or not isinstance(route_rows, dict):
+                        continue
+                    kept_rows = {}
+                    for route_name, spec in route_rows.items():
+                        if route_name in routes.get(modality, ()):
+                            public_spec = _sanitize_public_route_constraint(spec)
+                            if public_spec:
+                                kept_rows[route_name] = public_spec
+                    if kept_rows:
+                        route_constraints[modality] = kept_rows
+    return {
+        "adapter": adapter_name,
+        "execution": execution,
+        "routes": routes,
+        "route_constraints": route_constraints,
+    }
+
+
+def _resource_model_allowed(model: str) -> bool:
+    if not model or len(model) > 256:  # ruff: ignore[magic-value-comparison]
+        return False
+    if model == "stub/mirror" and STUB_ENABLED:
+        return True
+    if model in ALLOWED_MODELS:
+        return True
+    owner = model.split("/", 1)[0] if "/" in model else ""
+    return bool(owner and owner in set(HF_SPACES_MODEL_NAMESPACES))
+
+
+#: Maximum decoded upstream response bytes accepted before the proxy aborts the
+#: provider stream. This is independent from request-body limits because a
+#: malicious/misconfigured upstream controls response size.
+MAX_UPSTREAM_RESPONSE_BYTES: int = max(
+    64 * 1024,
+    min(
+        _safe_int(os.environ.get("MAX_UPSTREAM_RESPONSE_BYTES"), 8 * 1024 * 1024),
+        32 * 1024 * 1024,
+    ),
+)
+
+#: Maximum JSON request size accepted by Global Share.  Kept independent from
+#: chat bodies so a public share service cannot consume 10 MiB per request.
+SHARE_MAX_BODY_BYTES: int = max(
+    16_384,
+    min(
+        _safe_int(os.environ.get("SHARE_MAX_BODY_BYTES"), 512_000),
+        2_000_000,
+    ),
+)
+
+#: Hard in-memory share-store bounds.  A deployment can lower these values but
+#: cannot raise them beyond conservative process-safety ceilings here.
+SHARE_MAX_ENTRIES: int = max(
+    1,
+    min(
+        _safe_int(os.environ.get("SHARE_MAX_ENTRIES"), 256),
+        2048,
+    ),
+)
+SHARE_MAX_TOTAL_BYTES: int = max(
+    SHARE_MAX_BODY_BYTES,
+    min(
+        _safe_int(os.environ.get("SHARE_MAX_TOTAL_BYTES"), 16 * 1024 * 1024),
+        64 * 1024 * 1024,
+    ),
+)
+
+#: Deployment hardening profile. ``compat`` preserves existing deployments.
+#: ``strict`` is used by the release container and cannot be weakened by a
+#: per-feature setting: it requires non-root execution, exact-origin CORS, and
+#: verified TLS for every configured Redis control plane.
+DEPLOYMENT_PROFILE: str = (
+    os.environ.get("DEPLOYMENT_PROFILE", "compat").strip().lower() or "compat"
+)
+_DEPLOYMENT_PROFILE_VALID: bool = DEPLOYMENT_PROFILE in {"compat", "strict"}
+DEPLOYMENT_STRICT: bool = DEPLOYMENT_PROFILE == "strict"
+REDIS_REQUIRE_TLS: bool = DEPLOYMENT_STRICT or os.environ.get(
+    "REDIS_REQUIRE_TLS", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+REQUIRE_NON_ROOT: bool = DEPLOYMENT_STRICT or os.environ.get(
+    "REQUIRE_NON_ROOT", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+#: Optional deployment-level write gate for creating new Global Shares.  This
+#: secret must live only on the server.  Static Sphinx builds intentionally do
+#: not serialize it; browser users may supply a short-lived runtime credential
+#: only when an operator chooses this deployment mode.
+SHARE_WRITE_TOKEN: str = os.environ.get("SHARE_WRITE_TOKEN", "").strip()
+
+#: Optional externally-visible base URL for Share links when the app sits behind
+#: a reverse proxy that does not preserve the public scheme/host in ASGI scope.
+#: Must be HTTP(S); production non-local bases must be HTTPS.  Hugging Face
+#: Spaces normally do not need this because SPACE_HOST provides the public host.
+SHARE_PUBLIC_BASE_URL: str = os.environ.get("SHARE_PUBLIC_BASE_URL", "").strip()
+
+#: Global Share lifecycle storage.  ``memory`` is compatibility only; it must
+#: never be represented as durable/shared.  Requirements fail writes closed.
+SHARE_STORE_BACKEND: str = (
+    os.environ.get("SHARE_STORE_BACKEND", "memory").strip().lower() or "memory"
+)
+SHARE_STORE_SQLITE_PATH: str = os.environ.get(
+    "SHARE_STORE_SQLITE_PATH",
+    "/tmp/scikitplot-ai-global-share.sqlite3",  # ruff: ignore[hardcoded-temp-file]
+).strip()
+SHARE_STORE_REDIS_URL: str = os.environ.get("SHARE_STORE_REDIS_URL", "").strip()
+SHARE_STORE_KEY_PREFIX: str = (
+    os.environ.get("SHARE_STORE_KEY_PREFIX", "sphinx-ai-assistant").strip()
+    or "sphinx-ai-assistant"
+)
+try:
+    _raw_share_redis_timeout = float(
+        os.environ.get("SHARE_STORE_REDIS_TIMEOUT_SECONDS", "2") or 2
+    )
+except (TypeError, ValueError):
+    _raw_share_redis_timeout = 2.0
+SHARE_STORE_REDIS_TIMEOUT_SECONDS: float = max(
+    0.25, min(10.0, _raw_share_redis_timeout)
+)
+SHARE_REDIS_DURABILITY_CONFIRMED: bool = os.environ.get(
+    "SHARE_REDIS_DURABILITY_CONFIRMED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+SHARE_REQUIRE_DURABLE: bool = os.environ.get(
+    "SHARE_REQUIRE_DURABLE", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+SHARE_REQUIRE_SHARED: bool = os.environ.get(
+    "SHARE_REQUIRE_SHARED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+#: Hugging Face-provided public Space hostname (for example,
+#: ``owner-space.hf.space``).  This is deployment metadata, not caller input.
+SPACE_HOST: str = os.environ.get("SPACE_HOST", "").strip()
+
+#: Server-owned Share transport generation. Generation 2 means the public locator
+#: belongs in URL fragment/body transport and MUST NOT be served by capability-bearing
+#: legacy ``/v1/share/{id}`` request paths. Missing/1 marks pre-Run-14 objects only.
+SHARE_TRANSPORT_VERSION: int = 2
 
 # ── Per-path read timeouts ────────────────────────────────────────────────────
 #: Path 1 (BACKEND_URL) read timeout in seconds.
@@ -406,123 +1562,697 @@ _write_timeout_secs: float = _safe_float(os.environ.get("PROXY_WRITE_TIMEOUT"), 
 #: Connection pool acquire timeout in seconds.
 _pool_timeout_secs: float = _safe_float(os.environ.get("PROXY_POOL_TIMEOUT"), 10.0)
 
+#: Number of retries for a *remote* protocol/read failure before any response
+#: bytes have been exposed to the browser.  A chat completion has no persistence
+#: side effect, so one bounded retry is a useful recovery from a stale upstream
+#: keep-alive connection.  ``LocalProtocolError`` is deliberately never retried:
+#: it means our own request violated HTTP semantics and repeating it is pointless.
+_protocol_retries: int = max(
+    0, min(_safe_int(os.environ.get("PROXY_PROTOCOL_RETRIES"), 1), 2)
+)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # CORS
 # ─────────────────────────────────────────────────────────────────────────────
 
-_raw_origins: str = os.environ.get("ALLOWED_ORIGINS", "*").strip()
-_allowed_origins: list[str] = (
-    ["*"]
-    if _raw_origins == "*"
-    else [o.strip() for o in _raw_origins.split(",") if o.strip()]
+_DEFAULT_ALLOWED_ORIGINS: tuple[str, ...] = (
+    "https://scikit-plots.github.io",
+    "https://scikit-plots-learn.readthedocs.io",
 )
+_ALLOWED_ORIGIN_MODES: frozenset[str] = frozenset({"additive", "replace"})
+
+
+def _normalise_browser_origin(value: str) -> str:
+    """Return a canonical HTTP(S) origin, or ``""`` for malformed entries."""
+    candidate = str(value or "").strip().rstrip("/")
+    if not candidate:
+        return ""
+    try:
+        from urllib.parse import urlsplit  # ruff: ignore[import-outside-top-level]
+
+        parsed = urlsplit(candidate)
+    except ValueError:
+        return ""
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        return ""
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return ""
+    if parsed.path not in {"", "/"}:
+        return ""
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+
+
+def _normalise_allowed_origins_mode(value: str) -> str:
+    """Return the supported CORS composition mode without echoing bad input."""
+    mode = str(value or "additive").strip().lower() or "additive"
+    if mode not in _ALLOWED_ORIGIN_MODES:
+        logger.warning(
+            "AI proxy [CORS_MODE_INVALID]: invalid ALLOWED_ORIGINS_MODE; using additive defaults."
+        )
+        return "additive"
+    return mode
+
+
+def _build_allowed_origins(raw: str, *, mode: str = "additive") -> list[str]:
+    """Build the exact browser-origin allowlist.
+
+    ``additive`` retains the package defaults and appends deployment-specific
+    exact origins. ``replace`` starts empty so downstream/open-source deployments
+    can own their complete browser-origin trust boundary without editing source.
+    Only an explicit ``*`` selects wildcard compatibility mode.
+    """
+    text = str(raw or "").strip()
+    if text == "*":
+        return ["*"]
+    selected_mode = _normalise_allowed_origins_mode(mode)
+    merged: list[str] = (
+        list(_DEFAULT_ALLOWED_ORIGINS) if selected_mode == "additive" else []
+    )
+    for item in text.split(","):
+        item = item.strip()  # ruff: ignore[redefined-loop-name]
+        if not item:
+            continue
+        normalised = _normalise_browser_origin(item)
+        if not normalised:
+            logger.warning(
+                "AI proxy [CORS_ORIGIN_IGNORED]: malformed ALLOWED_ORIGINS entry ignored."
+            )
+            continue
+        if normalised not in merged:
+            merged.append(normalised)
+    return merged
+
+
+_raw_origins: str = os.environ.get("ALLOWED_ORIGINS", "").strip()
+ALLOWED_ORIGINS_MODE: str = _normalise_allowed_origins_mode(
+    os.environ.get("ALLOWED_ORIGINS_MODE", "additive")
+)
+_allowed_origins: list[str] = _build_allowed_origins(
+    _raw_origins, mode=ALLOWED_ORIGINS_MODE
+)
+
+#: Optional Share-only compatibility for browser opaque origins such as
+#: ``file://`` documents, which browsers serialize as ``Origin: null``.  This is
+#: deliberately disabled by default because sandboxed/opaque hostile documents
+#: can also produce ``Origin: null``; enabling it is an operator abuse-surface
+#: decision, not a way to authenticate local files.
+SHARE_ALLOW_OPAQUE_ORIGIN: bool = os.environ.get(
+    "SHARE_ALLOW_OPAQUE_ORIGIN", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+#: Additional high-risk opt-in for mutation/capability-management requests from
+#: ``Origin: null``.  It never grants anything unless read compatibility above
+#: is also enabled.  Strict deployments reject this flag entirely because a
+#: sandboxed hostile document is indistinguishable from a local file by Origin.
+SHARE_ALLOW_OPAQUE_ORIGIN_WRITE: bool = os.environ.get(
+    "SHARE_ALLOW_OPAQUE_ORIGIN_WRITE", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+# Starlette's CORS middleware must know about the literal serialized opaque
+# origin for the browser preflight to succeed.  The application guard below
+# still limits that opt-in to /v1/share routes only.
+_cors_allowed_origins: list[str] = list(_allowed_origins)
+if SHARE_ALLOW_OPAQUE_ORIGIN and _cors_allowed_origins != ["*"]:
+    _cors_allowed_origins.append("null")
+
+if _allowed_origins == ["*"]:
+    logger.warning(
+        "AI proxy [CORS_WILDCARD]: ALLOWED_ORIGINS=* explicitly enables every browser origin; "
+        "use an exact comma-separated origin list in production."
+    )
+elif ALLOWED_ORIGINS_MODE == "replace":
+    logger.info(
+        "AI proxy CORS: replacement mode active; only exact ALLOWED_ORIGINS entries are trusted."
+    )
+elif _raw_origins:
+    logger.info(
+        "AI proxy CORS: built-in documentation origins retained; ALLOWED_ORIGINS contributes additional exact origins."
+    )
+
+#: Trust ``X-Forwarded-For`` only when a known ingress proxy strips/overwrites
+#: caller-supplied values.  Default false prevents rate-limit identity spoofing.
+TRUST_X_FORWARDED_FOR: bool = os.environ.get(
+    "TRUST_X_FORWARDED_FOR", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 #: HuggingFace Dataset repo for training contributions.
 #: Must be set if POST /v1/contribute is expected to succeed.
 TRAINING_DATASET_REPO: str = os.environ.get("TRAINING_DATASET_REPO", "").strip()
 
-#: Consent-version enforcement is controlled by a SINGLE flag,
-#: :data:`_dataset_schema.CONSENT_VERSION_ENABLED`, imported above as
-#: ``CONSENT_VERSION_ENABLED``.  While ``False`` (current state), the
-#: ``consentVersion`` field in ``POST /v1/contribute`` is **not validated** —
-#: any value (including ``null``, sent by the current JS) is accepted, and
-#: every normalised record stores ``consentVersion: null`` regardless of what
-#: the client sent (see ``_dataset_schema._resolve_consent_version``).
-#:
-#: Previously this module had its OWN ``TRAINING_CONSENT_VERSION = "v1.0"``
-#: constant and a hard ``payload["consentVersion"] != "v1.0"`` check — when
-#: the JS was updated to send ``consentVersion: null`` (matching
-#: ``_dataset_schema``'s new convention), every ``/v1/contribute`` call
-#: started failing with 422 "consentVersion ... is not current", because the
-#: two modules' notions of "the current consent version" had silently
-#: diverged.  Importing the flag (and :data:`RESERVED_CONSENT_VERSION` below)
-#: directly from ``_dataset_schema`` makes that divergence structurally
-#: impossible: flipping ``CONSENT_VERSION_ENABLED`` to ``True`` in ONE place
-#: (``_dataset_schema.py``) simultaneously activates the 422 guard below AND
-#: the write-side normalisation — see ``_dataset_schema.py`` for the full
-#: activation checklist (also requires an ``ai-assistant.js`` update to send
-#: ``consentVersion: CONSENT_VERSION`` again instead of ``null``).
+#: Provider-neutral record storage targets. JSON array; see README.  When unset,
+#: TRAINING_DATASET_REPO + HF_WRITE_TOKEN/HF_TOKEN are synthesized as one
+#: Hugging Face primary target for backwards compatibility.
+RECORD_STORAGE_TARGETS: str = (
+    os.environ.get("RECORD_STORAGE_TARGETS", "").strip()
+    or os.environ.get("DATASET_TARGETS_JSON", "").strip()
+)
 
-#: When ``True``, ``POST /v1/feedback`` is persisted to ``TRAINING_DATASET_REPO``
-#: under the ``feedback/`` folder alongside ``contributions/``.
-#:
-#: Default ``True`` — feedback is written to the HuggingFace dataset (durable,
-#: survives Space restarts) whenever ``TRAINING_DATASET_REPO`` and
-#: ``HF_DATASET_TOKEN`` are configured.  Set ``FEEDBACK_PERSIST_ENABLED=false``
-#: (or ``0`` / ``no``) to revert to log-only / in-memory behaviour.
-#:
-#: **Rationale for opt-out default** — the previous opt-in default (``False``)
-#: silently discarded all feedback on fresh or restarted deployments even when
-#: dataset credentials were present.  Opt-out is safer for operators who intend
-#: to collect training data: a misconfiguration now causes visible log noise
-#: rather than silent data loss.
-#:
-#: **Deduplication responsibility** — enabling this flag means the same
-#: ``(conversationId, answerIndex)`` pair *may* appear in both
-#: ``contributions/*.jsonl`` (when the user also clicks Contribute) and
-#: ``feedback/*.jsonl`` (from the immediate rating button).  Every stored
-#: record carries ``_source`` and ``_dedup_key`` fields so that downstream
-#: consumers can deterministically resolve duplicates before training.
-#: See ``DATASET_COLLECTION_GUIDANCE.md`` for the canonical dedup procedure.
-#:
-#: How to disable
-#: --------------
-#: HF Spaces → Settings → Repository secrets → add
-#: ``FEEDBACK_PERSIST_ENABLED`` = ``false``  (also accepts ``0``, ``no``)
-#: Without ``TRAINING_DATASET_REPO`` and ``HF_WRITE_TOKEN`` / ``HF_TOKEN``
-#: the flag has no effect regardless of its value.
+
+#: Contribution consent version is owned by ``_dataset_schema`` and enforced
+#: on every new intake.  Browser and server versions must change together.
+#: Ordinary feedback is privacy-minimal telemetry, never training content.
+#: Persistence is opt-in at both browser and server.  Even when enabled the
+#: server normalizer discards query/answer/comment/model/page/session fields.
 FEEDBACK_PERSIST_ENABLED: bool = os.environ.get(
-    "FEEDBACK_PERSIST_ENABLED", "true"
-).strip().lower() not in ("false", "0", "no")
+    "FEEDBACK_PERSIST_ENABLED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+
+#: Independent small body limit for rating telemetry.
+FEEDBACK_MAX_BODY_BYTES: int = 16 * 1024
+
+#: Content-bearing maintainer feedback is a separate authority from telemetry.
+#: ``provider-pr`` opens/updates one native review per participant receipt;
+#: ``disabled`` keeps all ratings local/telemetry-only even if a stale client
+#: attempts the review route.  Browser review permission is independently
+#: versioned and required on every review create/update.
+FEEDBACK_REVIEW_MODE: str = (
+    os.environ.get("FEEDBACK_REVIEW_MODE", "provider-pr").strip().lower()
+    or "provider-pr"
+)
+if FEEDBACK_REVIEW_MODE not in {"disabled", "provider-pr"}:
+    FEEDBACK_REVIEW_MODE = "disabled"
+FEEDBACK_REVIEW_CONSENT_VERSION: str = "2.0.0"
+FEEDBACK_TRAINING_CONSENT_VERSION: str = "1.0.0"
+FEEDBACK_REVIEW_MAX_BODY_BYTES: int = 256 * 1024
+FEEDBACK_REVIEW_TTL_SECONDS: int = max(
+    3600,
+    min(
+        30 * 86400, _safe_int(os.environ.get("FEEDBACK_REVIEW_TTL_SECONDS"), 7 * 86400)
+    ),
+)
+
+#: Pending contribution review configuration.
+#: ``ledger`` keeps the historical process/DB quarantine and requires explicit
+#: promotion. ``provider-pr`` writes the future eligible record to a native
+#: provider review ref (GitHub PR, GitLab MR, Bitbucket PR, or Hugging Face PR);
+#: only merging into the configured canonical branch makes it training eligible.
+CONTRIBUTION_REVIEW_MODE: str = (
+    os.environ.get("CONTRIBUTION_REVIEW_MODE", "ledger").strip().lower() or "ledger"
+)
+if CONTRIBUTION_REVIEW_MODE not in {"ledger", "provider-pr"}:
+    CONTRIBUTION_REVIEW_MODE = "ledger"
+CONTRIBUTION_REVIEW_TOKEN: str = os.environ.get("CONTRIBUTION_REVIEW_TOKEN", "").strip()
+CONTRIBUTION_MAX_BODY_BYTES: int = 256 * 1024
+CONTRIBUTION_QUARANTINE_TTL_SECONDS: int = max(
+    300,
+    min(
+        604800,
+        int(os.environ.get("CONTRIBUTION_QUARANTINE_TTL_SECONDS", "86400") or 86400),
+    ),
+)
+CONTRIBUTION_QUARANTINE_MAX_ENTRIES: int = max(
+    1,
+    min(1024, int(os.environ.get("CONTRIBUTION_QUARANTINE_MAX_ENTRIES", "128") or 128)),
+)
+CONTRIBUTION_QUARANTINE_MAX_TOTAL_BYTES: int = max(
+    65536,
+    min(
+        64 * 1024 * 1024,
+        int(
+            os.environ.get(
+                "CONTRIBUTION_QUARANTINE_MAX_TOTAL_BYTES", str(4 * 1024 * 1024)
+            )
+            or (4 * 1024 * 1024)
+        ),
+    ),
+)
+CONTRIBUTION_LEDGER_BACKEND: str = (
+    os.environ.get("CONTRIBUTION_LEDGER_BACKEND", "memory").strip().lower() or "memory"
+)
+CONTRIBUTION_LEDGER_SQLITE_PATH: str = os.environ.get(
+    "CONTRIBUTION_LEDGER_SQLITE_PATH",
+    "/tmp/scikitplot-ai-contribution-lifecycle.sqlite3",  # ruff: ignore[hardcoded-temp-file]
+).strip()
+CONTRIBUTION_REQUIRE_DURABLE: bool = os.environ.get(
+    "CONTRIBUTION_REQUIRE_DURABLE", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+CONTRIBUTION_REQUIRE_SHARED: bool = os.environ.get(
+    "CONTRIBUTION_REQUIRE_SHARED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+CONTRIBUTION_LEDGER_REDIS_URL: str = os.environ.get(
+    "CONTRIBUTION_LEDGER_REDIS_URL", ""
+).strip()
+CONTRIBUTION_LEDGER_KEY_SECRET: str = os.environ.get(
+    "CONTRIBUTION_LEDGER_KEY_SECRET", ""
+)
+CONTRIBUTION_LEDGER_KEY_PREFIX: str = (
+    os.environ.get("CONTRIBUTION_LEDGER_KEY_PREFIX", "sphinx-ai-assistant").strip()
+    or "sphinx-ai-assistant"
+)
+CONTRIBUTION_OPERATION_LEASE_SECONDS: int = max(
+    30, min(900, _safe_int(os.environ.get("CONTRIBUTION_OPERATION_LEASE_SECONDS"), 120))
+)
+try:
+    _raw_contribution_redis_timeout = float(
+        os.environ.get("CONTRIBUTION_LEDGER_REDIS_TIMEOUT_SECONDS", "2") or 2
+    )
+except (TypeError, ValueError):
+    _raw_contribution_redis_timeout = 2.0
+CONTRIBUTION_LEDGER_REDIS_TIMEOUT_SECONDS: float = max(
+    0.25, min(10.0, _raw_contribution_redis_timeout)
+)
+CONTRIBUTION_LEDGER_MAX_RECEIPTS: int = max(
+    CONTRIBUTION_QUARANTINE_MAX_ENTRIES,
+    min(100_000, _safe_int(os.environ.get("CONTRIBUTION_LEDGER_MAX_RECEIPTS"), 10_000)),
+)
+CONTRIBUTION_LEDGER_TERMINAL_RETENTION_SECONDS: int = max(
+    300,
+    min(
+        30 * 86400,
+        _safe_int(
+            os.environ.get("CONTRIBUTION_LEDGER_TERMINAL_RETENTION_SECONDS"), 86400
+        ),
+    ),
+)
+
+
+#: Feedback-review lifecycle uses the same hardened ledger implementation but
+#: a distinct namespace/file so its participant capabilities and capacity never
+#: collide with dataset-contribution receipts. Defaults inherit the contribution
+#: backend topology for operator simplicity.
+FEEDBACK_REVIEW_LEDGER_BACKEND: str = (
+    os.environ.get("FEEDBACK_REVIEW_LEDGER_BACKEND", CONTRIBUTION_LEDGER_BACKEND)
+    .strip()
+    .lower()
+    or CONTRIBUTION_LEDGER_BACKEND
+)
+FEEDBACK_REVIEW_LEDGER_SQLITE_PATH: str = os.environ.get(
+    "FEEDBACK_REVIEW_LEDGER_SQLITE_PATH",
+    CONTRIBUTION_LEDGER_SQLITE_PATH + ".feedback-review",
+).strip()
+FEEDBACK_REVIEW_LEDGER_REDIS_URL: str = os.environ.get(
+    "FEEDBACK_REVIEW_LEDGER_REDIS_URL", CONTRIBUTION_LEDGER_REDIS_URL
+).strip()
+FEEDBACK_REVIEW_LEDGER_KEY_SECRET: str = os.environ.get(
+    "FEEDBACK_REVIEW_LEDGER_KEY_SECRET", CONTRIBUTION_LEDGER_KEY_SECRET
+)
+FEEDBACK_REVIEW_LEDGER_KEY_PREFIX: str = os.environ.get(
+    "FEEDBACK_REVIEW_LEDGER_KEY_PREFIX",
+    CONTRIBUTION_LEDGER_KEY_PREFIX + ":feedback-review",
+).strip() or (CONTRIBUTION_LEDGER_KEY_PREFIX + ":feedback-review")
+FEEDBACK_REVIEW_REQUIRE_DURABLE: bool = os.environ.get(
+    "FEEDBACK_REVIEW_REQUIRE_DURABLE",
+    "true" if CONTRIBUTION_REQUIRE_DURABLE else "false",
+).strip().lower() in {"1", "true", "yes", "on"}
+FEEDBACK_REVIEW_REQUIRE_SHARED: bool = os.environ.get(
+    "FEEDBACK_REVIEW_REQUIRE_SHARED",
+    "true" if CONTRIBUTION_REQUIRE_SHARED else "false",
+).strip().lower() in {"1", "true", "yes", "on"}
+FEEDBACK_REVIEW_LEDGER_MAX_RECEIPTS: int = max(
+    128,
+    min(
+        100_000,
+        _safe_int(os.environ.get("FEEDBACK_REVIEW_LEDGER_MAX_RECEIPTS"), 10_000),
+    ),
+)
+
+
+#: Rate-limit backend. ``local`` is the bounded compatibility abuse gate.
+#: ``redis`` is a shared atomic fixed-window decision domain suitable for
+#: horizontally scaled proxy replicas. Redis mode requires a >=32-byte secret
+#: so raw client identities are HMACed before they enter external storage.
+RATE_LIMIT_BACKEND: str = (
+    os.environ.get("RATE_LIMIT_BACKEND", "local").strip().lower() or "local"
+)
+RATE_LIMIT_REDIS_URL: str = os.environ.get("RATE_LIMIT_REDIS_URL", "").strip()
+RATE_LIMIT_IDENTITY_SECRET: str = os.environ.get("RATE_LIMIT_IDENTITY_SECRET", "")
+RATE_LIMIT_KEY_PREFIX: str = (
+    os.environ.get("RATE_LIMIT_KEY_PREFIX", "sphinx-ai-assistant").strip()
+    or "sphinx-ai-assistant"
+)
+RATE_LIMIT_REQUIRE_SHARED: bool = os.environ.get(
+    "RATE_LIMIT_REQUIRE_SHARED", "false"
+).strip().lower() in {"1", "true", "yes", "on"}
+try:
+    _raw_rate_limit_timeout = float(
+        os.environ.get("RATE_LIMIT_REDIS_TIMEOUT_SECONDS", "2") or 2
+    )
+except (TypeError, ValueError):
+    _raw_rate_limit_timeout = 2.0
+RATE_LIMIT_REDIS_TIMEOUT_SECONDS: float = max(0.25, min(10.0, _raw_rate_limit_timeout))
+
+CHAT_RATE_LIMIT_PER_HOUR: int = max(
+    1, min(_safe_int(os.environ.get("CHAT_RATE_LIMIT_PER_HOUR"), 30), 10_000)
+)
+ZIP_EDIT_RATE_LIMIT_PER_HOUR: int = max(
+    1, min(_safe_int(os.environ.get("ZIP_EDIT_RATE_LIMIT_PER_HOUR"), 20), 10_000)
+)
+PROVIDER_ARTIFACT_RATE_LIMIT_PER_HOUR: int = max(
+    1,
+    min(_safe_int(os.environ.get("PROVIDER_ARTIFACT_RATE_LIMIT_PER_HOUR"), 10), 10_000),
+)
+SHARE_RATE_LIMIT_PER_HOUR: int = max(
+    1, min(_safe_int(os.environ.get("SHARE_RATE_LIMIT_PER_HOUR"), 10), 10_000)
+)
+FEEDBACK_RATE_LIMIT_PER_HOUR: int = max(
+    1, min(_safe_int(os.environ.get("FEEDBACK_RATE_LIMIT_PER_HOUR"), 30), 10_000)
+)
+FEEDBACK_REVIEW_RATE_LIMIT_PER_HOUR: int = max(
+    1, min(_safe_int(os.environ.get("FEEDBACK_REVIEW_RATE_LIMIT_PER_HOUR"), 20), 10_000)
+)
+CONTRIBUTION_RATE_LIMIT_PER_HOUR: int = max(
+    1, min(_safe_int(os.environ.get("CONTRIBUTION_RATE_LIMIT_PER_HOUR"), 5), 10_000)
+)
+
+#: Whether this proxy forwards the reasoning-control parameters that the
+#: documentation panel can send (``reasoning_effort`` for OpenAI-compatible
+#: upstreams, ``thinking`` for Anthropic).
+#:
+#: Configuration
+#: -------------
+#: HF Spaces -> Settings -> Repository secrets -> add
+#: ``REASONING_ENABLED`` = ``true``  (also accepts ``1``, ``yes``)
+#:
+#: **Operator note** -- Default ``false``, and deliberately so.  A strict
+#: upstream rejects a request carrying an unknown top-level field with a 400,
+#: so advertising support the upstream does not have would break every chat
+#: request rather than degrade one setting.  Turn this on once you know the
+#: model behind this proxy accepts the fields.
+#:
+#: **Developer note** -- This flag only controls what ``/health`` ADVERTISES.
+#: The proxy forwards request bodies verbatim either way; it is a transparent
+#: pipe, and making it strip or inject fields would break that contract and
+#: hide upstream errors from the operator.  The flag exists so the panel can
+#: stop relying on a hand-written declaration in a different repository.
+#: Whether the deterministic stub responder ("Path 0") is reachable.
+#:
+#: Configuration
+#: -------------
+#: HF Spaces -> Settings -> Variables -> add
+#: ``STUB_ENABLED`` = ``true``
+#:
+#: **Operator note** -- Default ``true`` so the documentation panel's built-in
+#: diagnostics work out of the box. The stub never forwards upstream and never
+#: reads a credential. Set ``STUB_ENABLED=false`` for deployments that do not
+#: want the reserved diagnostic namespace reachable. Every stub request is logged.
+#:
+#: **Developer note** -- ``stub/*`` is a reserved fail-closed namespace. With
+#: this off, the proxy returns a local HTTP 503 ``stub_disabled`` response and
+#: never forwards the diagnostic request to a real inference provider.
+STUB_ENABLED: bool = os.environ.get(
+    "STUB_ENABLED",
+    "true",
+).strip().lower() in ("true", "1", "yes")
+
+REASONING_ENABLED: bool = os.environ.get(
+    "REASONING_ENABLED", "false"
+).strip().lower() in ("true", "1", "yes")
+
+#: Wire field name for the effort level, when ``REASONING_ENABLED`` is set.
+#: Override only for an upstream that renames it.
+REASONING_EFFORT_PARAM: str = os.environ.get(
+    "REASONING_EFFORT_PARAM", "reasoning_effort"
+).strip()
+
+#: Wire field name for the extended-reasoning object.  Set to an empty string
+#: for an upstream that offers effort but not a thinking budget.
+REASONING_THINKING_PARAM: str = os.environ.get("REASONING_THINKING_PARAM", "").strip()
+
+#: Thinking payload mode advertised to the panel when a Thinking field is
+#: configured.  The proxy remains a transparent forwarder; this tells the UI
+#: only which validated adapter shape the upstream is known to accept.
+_raw_reasoning_thinking_mode = (
+    os.environ.get("REASONING_THINKING_MODE", "budget").strip().lower()
+)
+if _raw_reasoning_thinking_mode not in {"boolean", "adaptive", "budget"}:
+    logger.error(
+        "AI proxy [REASONING_CONFIG_INVALID]: invalid REASONING_THINKING_MODE; "
+        "safe budget mode will be advertised."
+    )
+    _raw_reasoning_thinking_mode = "budget"
+REASONING_THINKING_MODE: str = _raw_reasoning_thinking_mode
+
+
+def _reasoning_env_int(name: str, default: int) -> int:
+    """Return a bounded reasoning integer without logging its raw value."""
+    raw = os.environ.get(name, str(default))
+    try:
+        value = int(raw or default)
+    except (TypeError, ValueError):
+        logger.error(
+            "AI proxy [REASONING_CONFIG_INVALID]: invalid %s; safe default used.",
+            name,
+        )
+        value = default
+    return max(500, min(16000, value))
+
+
+#: Token-budget bounds advertised to the panel. Invalid environment values are
+#: fail-soft and privacy-safe: only the fixed option name is logged, never the
+#: supplied value or request data.
+REASONING_BUDGET_MIN: int = _reasoning_env_int("REASONING_BUDGET_MIN", 500)
+REASONING_BUDGET_MAX: int = max(
+    REASONING_BUDGET_MIN,
+    _reasoning_env_int("REASONING_BUDGET_MAX", 16000),
+)
 
 #: Maximum records per contribution POST.
 MAX_CONTRIBUTION_RECORDS: int = 100
 
-#: Maximum number of distinct IP entries kept in each in-memory rate-limit dict.
-#: When the dict would exceed this size a full sweep removes all entries whose
-#: sliding window has expired before the new entry is stored.  This bounds
-#: memory to O(_MAX_RL_ENTRIES) even under a slow-drip unique-IP scan that
-#: never reuses the same address.  Value chosen to be generous for legitimate
-#: traffic (thousands of real users) while preventing unbounded growth.
-_MAX_RL_ENTRIES: int = 10_000
+#: Maximum number of distinct identities kept in each in-memory rate-limit dict.
+#: Expired windows are swept before admission; when all remaining entries are
+#: live, a new identity fails closed instead of growing the map.  This keeps
+#: attacker-controlled identity cardinality strictly O(_MAX_RL_ENTRIES).
+_MAX_RL_ENTRIES: int = max(
+    128,
+    min(
+        _safe_int(os.environ.get("RATE_LIMIT_MAX_IDENTITIES"), 10_000),
+        50_000,
+    ),
+)
 
-#: In-memory per-IP rate-limit store for contribution endpoint.
-#: Keys: IP string.  Values: (count, window_start_timestamp).
+#: In-memory per-IP rate-limit stores. Raw identities are process-memory only;
+#: application logs receive only the existing masked representation.
+_chat_rl: dict[str, tuple[int, float]] = {}
+_chat_rl_lock = asyncio.Lock()
+_zip_edit_rl: dict[str, tuple[int, float]] = {}
+_zip_edit_rl_lock = asyncio.Lock()
+_provider_artifact_rl: dict[str, tuple[int, float]] = {}
+_provider_artifact_rl_lock = asyncio.Lock()
 _contrib_rl: dict[str, tuple[int, float]] = {}
 _contrib_rl_lock = asyncio.Lock()
+_feedback_review_rl: dict[str, tuple[int, float]] = {}
+_feedback_review_rl_lock = asyncio.Lock()
+
+#: Optional shared rate-limit authority. Configuration errors are retained as
+#: bounded codes and cause every rate-limited route to fail closed in redis mode.
+_RATE_LIMIT_CONFIG_ERROR: str = ""
+_SHARED_RATE_LIMITER: RedisRateLimiter | None = None
+_SHARED_RATE_LIMITER_READY: bool = False
+if RATE_LIMIT_BACKEND == "redis":
+    try:
+        _SHARED_RATE_LIMITER = RedisRateLimiter(
+            RATE_LIMIT_REDIS_URL,
+            identity_secret=RATE_LIMIT_IDENTITY_SECRET,
+            key_prefix=RATE_LIMIT_KEY_PREFIX,
+            socket_timeout_seconds=RATE_LIMIT_REDIS_TIMEOUT_SECONDS,
+            require_tls=REDIS_REQUIRE_TLS,
+        )
+    except RateLimitBackendError as _rl_exc:
+        _RATE_LIMIT_CONFIG_ERROR = _rl_exc.code
+elif RATE_LIMIT_BACKEND != "local":
+    _RATE_LIMIT_CONFIG_ERROR = "UNSUPPORTED_RATE_LIMIT_BACKEND"
+
+#: Mutable contribution receipt control plane.  The default ``memory`` mode
+#: preserves compatibility and intentionally remains process-local.  SQLite is
+#: the local transactional/restart-durable option.  Redis is the shared atomic
+#: cross-replica authority when configured with a dedicated HMAC key; deployments
+#: may require either property explicitly and fail closed when it is unavailable.
+#: External Redis persistence/durability is a separate operator guarantee.
+_CONTRIBUTION_LEDGER_CONFIG_ERROR: str = ""
+_CONTRIBUTION_LEDGER_READY: bool = False
+try:
+    _CONTRIBUTION_LEDGER = build_contribution_ledger(
+        CONTRIBUTION_LEDGER_BACKEND,
+        sqlite_path=CONTRIBUTION_LEDGER_SQLITE_PATH,
+        redis_url=CONTRIBUTION_LEDGER_REDIS_URL,
+        redis_key_secret=CONTRIBUTION_LEDGER_KEY_SECRET,
+        redis_key_prefix=CONTRIBUTION_LEDGER_KEY_PREFIX,
+        redis_timeout_seconds=CONTRIBUTION_LEDGER_REDIS_TIMEOUT_SECONDS,
+        operation_lease_seconds=CONTRIBUTION_OPERATION_LEASE_SECONDS,
+        require_redis_tls=REDIS_REQUIRE_TLS,
+        max_pending_entries=CONTRIBUTION_QUARANTINE_MAX_ENTRIES,
+        max_pending_bytes=CONTRIBUTION_QUARANTINE_MAX_TOTAL_BYTES,
+        max_receipts=CONTRIBUTION_LEDGER_MAX_RECEIPTS,
+        terminal_retention_seconds=CONTRIBUTION_LEDGER_TERMINAL_RETENTION_SECONDS,
+    )
+except ContributionLedgerError as _ledger_exc:
+    _CONTRIBUTION_LEDGER_CONFIG_ERROR = _ledger_exc.code
+    _CONTRIBUTION_LEDGER = build_contribution_ledger(
+        "memory",
+        sqlite_path=CONTRIBUTION_LEDGER_SQLITE_PATH,
+        max_pending_entries=CONTRIBUTION_QUARANTINE_MAX_ENTRIES,
+        max_pending_bytes=CONTRIBUTION_QUARANTINE_MAX_TOTAL_BYTES,
+        max_receipts=CONTRIBUTION_LEDGER_MAX_RECEIPTS,
+        terminal_retention_seconds=CONTRIBUTION_LEDGER_TERMINAL_RETENTION_SECONDS,
+    )
+
+# Compatibility-only inspection alias used by older tests/debug tooling. Routes
+# never use this mapping as authority. It is populated only by memory backend.
+_contrib_quarantine: dict[str, dict[str, Any]] = getattr(
+    _CONTRIBUTION_LEDGER, "entries", {}
+)
+
+_FEEDBACK_REVIEW_LEDGER_CONFIG_ERROR: str = ""
+_FEEDBACK_REVIEW_LEDGER_READY: bool = False
+try:
+    _FEEDBACK_REVIEW_LEDGER = build_contribution_ledger(
+        FEEDBACK_REVIEW_LEDGER_BACKEND,
+        sqlite_path=FEEDBACK_REVIEW_LEDGER_SQLITE_PATH,
+        redis_url=FEEDBACK_REVIEW_LEDGER_REDIS_URL,
+        redis_key_secret=FEEDBACK_REVIEW_LEDGER_KEY_SECRET,
+        redis_key_prefix=FEEDBACK_REVIEW_LEDGER_KEY_PREFIX,
+        redis_timeout_seconds=CONTRIBUTION_LEDGER_REDIS_TIMEOUT_SECONDS,
+        operation_lease_seconds=CONTRIBUTION_OPERATION_LEASE_SECONDS,
+        require_redis_tls=REDIS_REQUIRE_TLS,
+        max_pending_entries=max(128, CONTRIBUTION_QUARANTINE_MAX_ENTRIES),
+        max_pending_bytes=max(4 * 1024 * 1024, CONTRIBUTION_QUARANTINE_MAX_TOTAL_BYTES),
+        max_receipts=FEEDBACK_REVIEW_LEDGER_MAX_RECEIPTS,
+        terminal_retention_seconds=CONTRIBUTION_LEDGER_TERMINAL_RETENTION_SECONDS,
+    )
+except ContributionLedgerError as _feedback_ledger_exc:
+    _FEEDBACK_REVIEW_LEDGER_CONFIG_ERROR = _feedback_ledger_exc.code
+    _FEEDBACK_REVIEW_LEDGER = build_contribution_ledger(
+        "memory",
+        sqlite_path=FEEDBACK_REVIEW_LEDGER_SQLITE_PATH,
+        max_pending_entries=max(128, CONTRIBUTION_QUARANTINE_MAX_ENTRIES),
+        max_pending_bytes=max(4 * 1024 * 1024, CONTRIBUTION_QUARANTINE_MAX_TOTAL_BYTES),
+        max_receipts=FEEDBACK_REVIEW_LEDGER_MAX_RECEIPTS,
+        terminal_retention_seconds=CONTRIBUTION_LEDGER_TERMINAL_RETENTION_SECONDS,
+    )
 
 #: In-memory per-IP rate-limit store for share endpoint.
 _share_rl: dict[str, tuple[int, float]] = {}
 _share_rl_lock = asyncio.Lock()
 
-#: In-memory conversation share store.
-#: Keys: UUID hex string.  Values: share metadata dict including ``expiresAt_ts``.
-#: Ephemeral — clears on process restart.  Stale entries are evicted lazily on write.
-_share_store: dict[str, dict] = {}
-_share_store_lock = asyncio.Lock()
+#: Global Share lifecycle control plane.  The compatibility alias below is
+#: populated only by the memory backend; routes never use it as authority.
+_SHARE_STORE_CONFIG_ERROR: str = ""
+_SHARE_STORE_READY: bool = False
+try:
+    _SHARE_STORE = build_share_store(
+        SHARE_STORE_BACKEND,
+        sqlite_path=SHARE_STORE_SQLITE_PATH,
+        redis_url=SHARE_STORE_REDIS_URL,
+        redis_key_prefix=SHARE_STORE_KEY_PREFIX,
+        redis_timeout_seconds=SHARE_STORE_REDIS_TIMEOUT_SECONDS,
+        redis_durable_confirmed=SHARE_REDIS_DURABILITY_CONFIRMED,
+        require_redis_tls=REDIS_REQUIRE_TLS,
+        max_entries=SHARE_MAX_ENTRIES,
+        max_total_bytes=SHARE_MAX_TOTAL_BYTES,
+    )
+except ShareStoreError as _share_store_exc:
+    _SHARE_STORE_CONFIG_ERROR = _share_store_exc.code
+    _SHARE_STORE = build_share_store(
+        "memory",
+        sqlite_path=SHARE_STORE_SQLITE_PATH,
+        max_entries=SHARE_MAX_ENTRIES,
+        max_total_bytes=SHARE_MAX_TOTAL_BYTES,
+    )
+_share_store: dict[str, dict[str, Any]] = getattr(_SHARE_STORE, "entries", {})
+_share_store_lock = asyncio.Lock()  # compatibility-only test/debug symbol
+
+#: Provider-generated artifact lifecycle authority. Memory is compatibility-only
+#: and process-local. Redis is the shared atomic cross-replica authority.
+_PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR: str = ""
+_PROVIDER_ARTIFACT_LIFECYCLE_READY: bool = False
+try:
+    _PROVIDER_ARTIFACT_LIFECYCLE = build_provider_artifact_lifecycle_registry(
+        PROVIDER_ARTIFACT_LIFECYCLE_BACKEND,
+        redis_url=PROVIDER_ARTIFACT_LIFECYCLE_REDIS_URL,
+        redis_key_prefix=PROVIDER_ARTIFACT_LIFECYCLE_KEY_PREFIX,
+        redis_timeout_seconds=PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TIMEOUT_SECONDS,
+        require_redis_tls=REDIS_REQUIRE_TLS,
+        redis_cluster_mode=PROVIDER_ARTIFACT_LIFECYCLE_REDIS_TOPOLOGY == "cluster",
+    )
+except ProviderArtifactError as _provider_artifact_lifecycle_exc:
+    _PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR = _provider_artifact_lifecycle_exc.code
+    _PROVIDER_ARTIFACT_LIFECYCLE = build_provider_artifact_lifecycle_registry("memory")
 
 #: In-memory per-IP rate-limit store for feedback endpoint.
 _feedback_rl: dict[str, tuple[int, float]] = {}
 _feedback_rl_lock = asyncio.Lock()
 
+#: Strong references for storage tasks shielded from client disconnects.
+#: asyncio.shield() alone protects cancellation propagation, but retaining the
+#: Task explicitly guarantees the event loop can keep it alive until completion.
+_storage_tasks: set[asyncio.Task[Any]] = set()
+
+
+async def _persist_storage_record(
+    *,
+    kind: str,
+    content: bytes,
+    commit_message: str,
+    path_timestamp: float | None = None,
+):
+    """Run one storage write independently of the request socket lifetime."""
+    task = asyncio.create_task(
+        _STORAGE.write(
+            kind=kind,
+            content=content,
+            commit_message=commit_message,
+            path_timestamp=path_timestamp,
+        )
+    )
+    _storage_tasks.add(task)
+    task.add_done_callback(_storage_tasks.discard)
+    return await asyncio.shield(task)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Storage target normalization. Invalid multi-target configuration degrades to
+# the legacy Hugging Face target rather than preventing inference from starting.
+try:
+    _storage_targets = load_storage_targets(
+        RECORD_STORAGE_TARGETS,
+        legacy_repo=TRAINING_DATASET_REPO,
+        legacy_token=HF_DATASET_TOKEN,
+        legacy_token_type=HF_DATASET_TOKEN_TYPE,
+    )
+except StorageConfigError as _storage_exc:
+    logger.error("Record storage configuration rejected: code=%s", str(_storage_exc))
+    _storage_targets = load_storage_targets(
+        "",
+        legacy_repo=TRAINING_DATASET_REPO,
+        legacy_token=HF_DATASET_TOKEN,
+        legacy_token_type=HF_DATASET_TOKEN_TYPE,
+    )
+_STORAGE = StorageCoordinator(_storage_targets)
+
 # Startup validation — fail fast with actionable messages
 # ─────────────────────────────────────────────────────────────────────────────
 
 _validate_env(BACKEND_URL, HF_TOKEN, HF_SPACES_MODEL_URL)
+if BACKEND_AUTH_TOKEN:
+    _validate_credential_destination(
+        BACKEND_URL, credential_kind="BACKEND_AUTH_TOKEN", allow_local_http=True
+    )
+if HF_SPACES_AUTH_TOKEN:
+    _validate_credential_destination(
+        HF_SPACES_MODEL_URL, credential_kind="HF_SPACES_AUTH_TOKEN"
+    )
+if HF_TOKEN:
+    _validate_credential_destination(HF_BASE, credential_kind="HF_TOKEN")
 
 # Token-type least-privilege validation.  Runs after _validate_env confirms
 # that routing is viable.  Issues are logged at WARNING or ERROR level but
 # never block startup — the proxy starts in degraded mode so operators can
 # read the log and fix the configuration without a redeploy loop.
+# RECORD_STORAGE_TARGETS is authoritative when present.  Keep
+# TRAINING_DATASET_REPO available for legacy discovery/rollback, but do not run
+# the legacy HF token-consistency checks against it when provider-neutral
+# storage is active: those writes use each target's token_env instead.
+_LEGACY_HF_STORAGE_ACTIVE: bool = bool(
+    TRAINING_DATASET_REPO and not RECORD_STORAGE_TARGETS
+)
 _token_config_issues: list[str] = _validate_token_config(
     HF_TOKEN,
-    HF_WRITE_TOKEN,
-    TRAINING_DATASET_REPO,
+    HF_DATASET_TOKEN,
+    TRAINING_DATASET_REPO if _LEGACY_HF_STORAGE_ACTIVE else "",
     hf_token_type=HF_TOKEN_TYPE,
-    hf_write_token_type=HF_WRITE_TOKEN_TYPE,
+    hf_write_token_type=HF_DATASET_TOKEN_TYPE,
 )
 for _issue in _token_config_issues:
     _log_level = logging.ERROR if _issue.startswith("ERROR:") else logging.WARNING
@@ -530,34 +2260,45 @@ for _issue in _token_config_issues:
 
 if not BACKEND_URL and not HF_TOKEN:
     logger.warning(
-        "HF_TOKEN is not set. Requests to standard HF Inference API models "
-        "(e.g. openai/gpt-oss-20b, Qwen/*) will fail with 401 Unauthorized. "
-        "Only models in namespaces %s will be served via %s.",
-        list(HF_SPACES_MODEL_NAMESPACES),
-        HF_SPACES_MODEL_URL or "<HF_SPACES_MODEL_URL not set>",
+        "HF_TOKEN is not set. Standard provider inference is unavailable; "
+        "custom model-space routing remains configured=%s namespace_count=%d.",
+        bool(HF_SPACES_MODEL_URL),
+        len(HF_SPACES_MODEL_NAMESPACES),
     )
 
-if TRAINING_DATASET_REPO and not HF_DATASET_TOKEN:
-    logger.warning(
-        "TRAINING_DATASET_REPO is set (%r) but neither HF_WRITE_TOKEN nor "
-        "HF_TOKEN is configured. POST /v1/contribute will return 503. "
-        "Set HF_WRITE_TOKEN (preferred, write-scoped) or HF_TOKEN as fallback.",
-        TRAINING_DATASET_REPO,
+
+def is_read_only(token_type: str = HF_DATASET_TOKEN_TYPE):
+    """is_read_only."""
+    return token_type == "read"  # ruff: ignore[hardcoded-password-string]
+
+
+if (
+    _LEGACY_HF_STORAGE_ACTIVE
+    and HF_DATASET_TOKEN
+    and is_read_only(HF_DATASET_TOKEN_TYPE)
+):
+    logger.error(
+        "Dataset persistence token is read-only; configure a repo-scoped "
+        "fine-grained token or a classic write token."
     )
-elif TRAINING_DATASET_REPO and HF_WRITE_TOKEN:
+
+if _LEGACY_HF_STORAGE_ACTIVE and not HF_DATASET_TOKEN:
+    logger.warning(
+        "Legacy HF record storage is configured but no dataset token is present. "
+        "POST /v1/contribute will return 503 until a write-capable token is configured."
+    )
+elif _LEGACY_HF_STORAGE_ACTIVE and (HF_DATASET_TOKEN_EXPLICIT or HF_WRITE_TOKEN):
     logger.info(
-        "Training contributions enabled: repo=%r, using dedicated "
-        "HF_WRITE_TOKEN (hf_token=%s, write_token=%s).",
-        TRAINING_DATASET_REPO,
-        _token_log_fragment(HF_TOKEN),
-        _token_log_fragment(HF_WRITE_TOKEN),
+        "Legacy HF record storage enabled with a dedicated dataset token "
+        "(inference_type=%s dataset_type=%s).",
+        HF_TOKEN_TYPE,
+        HF_DATASET_TOKEN_TYPE,
     )
-elif TRAINING_DATASET_REPO:
+elif _LEGACY_HF_STORAGE_ACTIVE:
     logger.warning(
-        "Training contributions enabled: repo=%r. Using HF_TOKEN for dataset "
-        "writes (HF_WRITE_TOKEN not set). Recommend setting a dedicated "
-        "write-scoped HF_WRITE_TOKEN — see HF Settings > Tokens.",
-        TRAINING_DATASET_REPO,
+        "Legacy HF record storage is using the inference-token fallback "
+        "(token_type=%s). Prefer a repo-scoped fine-grained dataset token.",
+        HF_TOKEN_TYPE,
     )
 
 
@@ -570,8 +2311,48 @@ elif TRAINING_DATASET_REPO:
 _http_client: httpx.AsyncClient | None = None
 
 
+def _is_non_root_process() -> bool:
+    """Return a coarse least-privilege process fact without exposing the UID."""
+    geteuid = getattr(os, "geteuid", None)
+    if geteuid is None:  # pragma: no cover - Windows/non-POSIX deployment
+        return True
+    try:
+        return int(geteuid()) != 0
+    # defensive platform fallback
+    except Exception:  # pragma: no cover # ruff: ignore[blind-except]
+        return False
+
+
+def _deployment_policy_error() -> str:
+    """Return one bounded hardening-policy code, or ``""`` when satisfied."""
+    if not _DEPLOYMENT_PROFILE_VALID:
+        return "DEPLOYMENT_PROFILE_INVALID"
+    if REQUIRE_NON_ROOT and not _is_non_root_process():
+        return "ROOT_PROCESS_FORBIDDEN"
+    if DEPLOYMENT_STRICT and _allowed_origins == ["*"]:
+        return "CORS_WILDCARD_FORBIDDEN"
+    if DEPLOYMENT_STRICT and SHARE_ALLOW_OPAQUE_ORIGIN_WRITE:
+        return "OPAQUE_ORIGIN_WRITE_FORBIDDEN"
+    return ""
+
+
+def _deployment_public_status() -> dict[str, Any]:
+    """Expose coarse hardening facts only; never paths, hosts, credentials or UIDs."""
+    code = _deployment_policy_error()
+    return {
+        "profile": DEPLOYMENT_PROFILE if _DEPLOYMENT_PROFILE_VALID else "invalid",
+        "strict": DEPLOYMENT_STRICT,
+        "non_root": _is_non_root_process(),
+        "non_root_required": REQUIRE_NON_ROOT,
+        "redis_tls_required": REDIS_REQUIRE_TLS,
+        "policy_ready": not bool(code),
+    }
+
+
 @asynccontextmanager
-async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def _lifespan(  # ruff: ignore[too-many-branches]
+    app: FastAPI,
+) -> AsyncGenerator[None, None]:
     """
     Create and close the shared HTTP client on application startup / shutdown.
 
@@ -587,25 +2368,222 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     This allows concurrent Path 2 requests (600 s) and Path 3 requests
     (120 s) to coexist on the same client without either blocking the other.
     """
-    global _http_client  # noqa: PLW0603
-    _http_client = httpx.AsyncClient()
+    global _http_client, _SHARED_RATE_LIMITER_READY, _CONTRIBUTION_LEDGER_READY, _FEEDBACK_REVIEW_LEDGER_READY, _SHARE_STORE_READY, _PROVIDER_ARTIFACT_LIFECYCLE_READY  # noqa: PLW0603
+    _deployment_error = _deployment_policy_error()
+    if _deployment_error:
+        logger.critical(
+            "Deployment hardening policy rejected startup: code=%s", _deployment_error
+        )
+        raise RuntimeError(_deployment_error)
+    _http_client = httpx.AsyncClient(follow_redirects=False)
+    _STORAGE.set_client(_http_client)
+    # Provider capability planning does not grant I/O authority.  Enable only
+    # executors explicitly authorized by the deployment's pinned upstream.
+    _configure_resource_executors(_http_client)
+    try:
+        await _PROVIDER_ARTIFACT_LIFECYCLE.initialize()
+        _PROVIDER_ARTIFACT_LIFECYCLE_READY = True
+    except ProviderArtifactError as exc:
+        _PROVIDER_ARTIFACT_LIFECYCLE_READY = False
+        logger.error(
+            "Provider artifact lifecycle backend unavailable: code=%s", exc.code
+        )
+    _configure_provider_artifact_outputs(_http_client)
+    if _RESOURCE_EXECUTOR_REGISTRY.execution_state("openai") == "enabled":
+        logger.info(
+            "OpenAI first-class resource executor enabled for the pinned official backend."
+        )
+    if _RESOURCE_EXECUTOR_REGISTRY.execution_state("anthropic") == "enabled":
+        logger.info(
+            "Anthropic first-class resource executor enabled for the pinned official backend."
+        )
+    if _RESOURCE_EXECUTOR_REGISTRY.execution_state("gemini") == "enabled":
+        logger.info(
+            "Gemini first-class resource executor enabled for the pinned official backend."
+        )
+    if _RESOURCE_EXECUTOR_REGISTRY.execution_state("huggingface") == "enabled":
+        logger.info(
+            "Hugging Face task-aware Chat/VLM executor enabled for the official router."
+        )
+    if (
+        RATE_LIMIT_BACKEND == "redis"
+        and _SHARED_RATE_LIMITER is not None
+        and not _RATE_LIMIT_CONFIG_ERROR
+    ):
+        try:
+            await _SHARED_RATE_LIMITER.initialize()
+            _SHARED_RATE_LIMITER_READY = True
+        except RateLimitBackendError as exc:
+            _SHARED_RATE_LIMITER_READY = False
+            logger.error(
+                "Shared rate limiter unavailable at startup: code=%s", exc.code
+            )
+    try:
+        await _CONTRIBUTION_LEDGER.initialize()
+        _CONTRIBUTION_LEDGER_READY = True
+    except ContributionLedgerError as exc:
+        _CONTRIBUTION_LEDGER_READY = False
+        logger.error("Contribution lifecycle backend unavailable: code=%s", exc.code)
+    try:
+        await _FEEDBACK_REVIEW_LEDGER.initialize()
+        _FEEDBACK_REVIEW_LEDGER_READY = True
+    except ContributionLedgerError as exc:
+        _FEEDBACK_REVIEW_LEDGER_READY = False
+        logger.error("Feedback review lifecycle backend unavailable: code=%s", exc.code)
+    try:
+        await _SHARE_STORE.initialize()
+        _SHARE_STORE_READY = True
+    except ShareStoreError as exc:
+        _SHARE_STORE_READY = False
+        logger.error("Global Share lifecycle backend unavailable: code=%s", exc.code)
+    await _STORAGE.initialize()
+    for _storage_target in _STORAGE.manifest().get("targets", []):
+        _cap = (_storage_target.get("token") or {}).get("write_capability") or "unknown"
+        if _cap in {"missing-token", "denied", "denied-read-token"}:
+            logger.error(
+                "Record storage target unavailable: provider=%s code=%s",
+                _storage_target.get("provider") or "unknown",
+                _cap,
+            )
+        elif _cap in {"unverified", "legacy-unverified"}:
+            logger.warning(
+                "Record storage capability not pre-verified: provider=%s code=%s",
+                _storage_target.get("provider") or "unknown",
+                _cap,
+            )
+    _ledger_manifest = _CONTRIBUTION_LEDGER.manifest()
+    if _CONTRIBUTION_LEDGER_CONFIG_ERROR:
+        logger.error(
+            "Contribution lifecycle backend invalid: code=%s",
+            _CONTRIBUTION_LEDGER_CONFIG_ERROR,
+        )
+    if CONTRIBUTION_REQUIRE_DURABLE and not bool(_ledger_manifest.get("durable")):
+        logger.error(
+            "Contribution intake requires durable lifecycle storage but configured backend is non-durable."
+        )
+    if CONTRIBUTION_REQUIRE_SHARED and not (
+        bool(_ledger_manifest.get("shared"))
+        and bool(_ledger_manifest.get("authoritative"))
+        and _CONTRIBUTION_LEDGER_READY
+    ):
+        logger.error(
+            "Contribution intake requires shared authoritative lifecycle storage but it is unavailable."
+        )
+    logger.info(
+        "Contribution lifecycle ready: backend=%s durability=%s shared=%s",
+        _ledger_manifest.get("backend"),
+        _ledger_manifest.get("durability"),
+        bool(_ledger_manifest.get("shared")),
+    )
+    _feedback_review_manifest = _FEEDBACK_REVIEW_LEDGER.manifest()
+    if _FEEDBACK_REVIEW_LEDGER_CONFIG_ERROR:
+        logger.error(
+            "Feedback review lifecycle backend invalid: code=%s",
+            _FEEDBACK_REVIEW_LEDGER_CONFIG_ERROR,
+        )
+    if FEEDBACK_REVIEW_REQUIRE_DURABLE and not bool(
+        _feedback_review_manifest.get("durable")
+    ):
+        logger.error(
+            "Feedback review requires durable lifecycle storage but configured backend is non-durable."
+        )
+    if FEEDBACK_REVIEW_REQUIRE_SHARED and not (
+        bool(_feedback_review_manifest.get("shared"))
+        and bool(_feedback_review_manifest.get("authoritative"))
+        and _FEEDBACK_REVIEW_LEDGER_READY
+    ):
+        logger.error(
+            "Feedback review requires shared authoritative lifecycle storage but it is unavailable."
+        )
+    logger.info(
+        "Feedback review lifecycle ready: mode=%s backend=%s durability=%s shared=%s",
+        FEEDBACK_REVIEW_MODE,
+        _feedback_review_manifest.get("backend"),
+        _feedback_review_manifest.get("durability"),
+        bool(_feedback_review_manifest.get("shared")),
+    )
+    _share_manifest = _SHARE_STORE.manifest()
+    if _SHARE_STORE_CONFIG_ERROR:
+        logger.error(
+            "Global Share lifecycle backend invalid: code=%s", _SHARE_STORE_CONFIG_ERROR
+        )
+    if SHARE_REQUIRE_DURABLE and not bool(_share_manifest.get("durable")):
+        logger.error(
+            "Global Share requires durable storage but configured backend is non-durable."
+        )
+    if SHARE_REQUIRE_SHARED and not (
+        bool(_share_manifest.get("shared"))
+        and bool(_share_manifest.get("authoritative"))
+        and _SHARE_STORE_READY
+    ):
+        logger.error(
+            "Global Share requires shared authoritative storage but it is unavailable."
+        )
+    logger.info(
+        "Global Share lifecycle ready: backend=%s durability=%s shared=%s",
+        _share_manifest.get("backend"),
+        _share_manifest.get("durability"),
+        bool(_share_manifest.get("shared")),
+    )
+    _artifact_lifecycle_manifest = _PROVIDER_ARTIFACT_LIFECYCLE.manifest()
+    if _PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR:
+        logger.error(
+            "Provider artifact lifecycle backend invalid: code=%s",
+            _PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR,
+        )
+    if PROVIDER_ARTIFACT_LIFECYCLE_REQUIRE_SHARED and not (
+        bool(_artifact_lifecycle_manifest.get("shared"))
+        and bool(_artifact_lifecycle_manifest.get("authoritative"))
+        and _PROVIDER_ARTIFACT_LIFECYCLE_READY
+    ):
+        logger.error(
+            "Provider artifact output requires shared lifecycle authority but it is unavailable."
+        )
+    logger.info(
+        "Provider artifact lifecycle ready: backend=%s shared=%s authoritative=%s",
+        _artifact_lifecycle_manifest.get("backend"),
+        bool(_artifact_lifecycle_manifest.get("shared")),
+        bool(_artifact_lifecycle_manifest.get("authoritative")),
+    )
+    _rl_manifest = (
+        _SHARED_RATE_LIMITER.manifest()
+        if _SHARED_RATE_LIMITER is not None
+        else {
+            "backend": "local",
+            "shared": False,
+            "authoritative": False,
+            "consistency_scope": "process_local",
+        }
+    )
+    logger.info(
+        "Rate limit control plane: backend=%s shared=%s authoritative=%s ready=%s",
+        _rl_manifest.get("backend"),
+        bool(_rl_manifest.get("shared")),
+        bool(_rl_manifest.get("authoritative")),
+        RATE_LIMIT_BACKEND == "local" or _SHARED_RATE_LIMITER_READY,
+    )
     logger.info(
         "Proxy v%s started. HTTP client ready (timeout=per-request).",
         PROXY_VERSION,
     )
     logger.info(
-        "Routing: backend_url=%r | hf_spaces_model_url=%r | "
-        "hf_spaces_namespaces=%r | hf_token=%s | write_token=%s | default_model=%r",
-        BACKEND_URL or None,
-        HF_SPACES_MODEL_URL or None,
-        list(HF_SPACES_MODEL_NAMESPACES),
-        _token_log_fragment(HF_TOKEN, token_type=HF_TOKEN_TYPE),
-        (
-            _token_log_fragment(HF_WRITE_TOKEN, token_type=HF_WRITE_TOKEN_TYPE)
-            if HF_WRITE_TOKEN
-            else "<using-hf-token-fallback>"
-        ),
-        DEFAULT_MODEL,
+        "Contribution review workflow: mode=%s provider=%s canonical_branch=%s",
+        CONTRIBUTION_REVIEW_MODE,
+        getattr(getattr(_STORAGE, "primary", None), "provider", "none"),
+        getattr(getattr(_STORAGE, "primary", None), "branch", "none"),
+    )
+    logger.info(
+        "Routing initialized: backend_configured=%s | model_space_configured=%s | "
+        "hf_token_set=%s hf_token_type=%s | dataset_token_set=%s dataset_token_type=%s | "
+        "allowed_model_count=%d namespace_count=%d",
+        bool(BACKEND_URL),
+        bool(HF_SPACES_MODEL_URL),
+        bool(HF_TOKEN),
+        HF_TOKEN_TYPE,
+        bool(HF_DATASET_TOKEN),
+        HF_DATASET_TOKEN_TYPE,
+        len(ALLOWED_MODELS),
+        len(HF_SPACES_MODEL_NAMESPACES),
     )
     logger.info(
         "Timeouts (seconds): path1=%s | path2=%s | path3=%s | "
@@ -617,10 +2595,33 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         _write_timeout_secs,
         _pool_timeout_secs,
     )
+    logger.info(
+        "HTTP transport ready: httpx=%s | protocol_retries=%d",
+        getattr(httpx, "__version__", "unknown"),
+        _protocol_retries,
+    )
     try:
         yield
     finally:
+        await _STORAGE.close()
+        await _CONTRIBUTION_LEDGER.close()
+        _CONTRIBUTION_LEDGER_READY = False
+        await _FEEDBACK_REVIEW_LEDGER.close()
+        _FEEDBACK_REVIEW_LEDGER_READY = False
+        await _SHARE_STORE.close()
+        _SHARE_STORE_READY = False
+        if _SHARED_RATE_LIMITER is not None:
+            await _SHARED_RATE_LIMITER.close()
+        _SHARED_RATE_LIMITER_READY = False
+        _RESOURCE_EXECUTOR_REGISTRY.unregister("openai")
+        _RESOURCE_EXECUTOR_REGISTRY.unregister("anthropic")
+        _RESOURCE_EXECUTOR_REGISTRY.unregister("gemini")
+        _RESOURCE_EXECUTOR_REGISTRY.unregister("huggingface")
+        _PROVIDER_ARTIFACT_OUTPUT_REGISTRY.clear()
+        await _PROVIDER_ARTIFACT_LIFECYCLE.close()
+        _PROVIDER_ARTIFACT_LIFECYCLE_READY = False
         await _http_client.aclose()
+        _STORAGE.set_client(None)
         _http_client = None
         logger.info("Proxy shutdown. HTTP client closed.")
 
@@ -632,7 +2633,7 @@ async def _lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 app = FastAPI(
     title="sphinx-ai-assistant proxy",
     description=(
-        "Thin OpenAI-compatible reverse proxy for sphinx-ai-assistant. "
+        "Server-authoritative chat proxy for sphinx-ai-assistant. "
         "Routes to HF Serverless Inference API, a custom ai-model Space, "
         "or an explicit backend URL based on the model namespace."
     ),
@@ -644,17 +2645,63 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=_allowed_origins,
-    allow_methods=["GET", "HEAD", "POST", "PATCH", "OPTIONS"],
+    allow_origins=_cors_allowed_origins,
+    allow_methods=["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     # Authorization added for write endpoints (POST /v1/feedback, POST /v1/contribute)
     # that validate a Bearer token.  Without this the browser preflight rejects
     # requests containing Authorization headers before the handler runs.
     # HEAD added so the JS _pingUrl health-check and the HF Space internal health
     # monitor can send cross-origin HEAD / and HEAD /health without a CORS error.
     # PATCH added for PATCH /v1/share/{uuid} (content update, URL preserved).
-    allow_headers=["Content-Type", "Authorization"],
+    allow_headers=[
+        "Content-Type",
+        "Authorization",
+        "X-Share-Edit-Token",
+        "X-Contribution-Delete-Token",
+        "X-Feedback-Review-Token",
+        "X-AI-Operation-Id",
+        "X-AI-Resource-Id",
+        "X-AI-Management-Token-Hash",
+        "X-AI-Operation-Created-At",
+    ],
+    expose_headers=[
+        "Content-Disposition",
+        "X-AI-Artifact-Contract",
+        "X-AI-Artifact-Receipt",
+        "X-AI-Artifact-SHA256",
+    ],
     allow_credentials=False,
 )
+
+
+@app.middleware("http")
+async def _browser_origin_guard(request: Request, call_next):
+    """Reject disallowed browser origins before handlers perform work/writes."""
+    if not _origin_allowed(request):
+        raw_origin = request.headers.get("origin", "").strip()
+        if raw_origin == "null":
+            mode = _opaque_share_request_mode(request)
+            detail = (
+                "Opaque browser origin not allowed. Read-only local-file Share "
+                "compatibility requires SHARE_ALLOW_OPAQUE_ORIGIN=true. "
+                + (
+                    "Opaque-origin mutation additionally requires the high-risk "
+                    "SHARE_ALLOW_OPAQUE_ORIGIN_WRITE=true opt-in, which strict deployments forbid."
+                    if mode == "write"
+                    else "This compatibility also admits sandboxed opaque documents, so keep it off unless required."
+                )
+            )
+        else:
+            detail = (
+                "Origin not allowed. Official Scikit-Plots documentation origin "
+                "is always permitted by proxy v6.5.1+."
+            )
+        return JSONResponse(
+            {"detail": detail},
+            status_code=403,
+            headers={"Cache-Control": "no-store"},
+        )
+    return await call_next(request)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -691,6 +2738,8 @@ def _resolve_url(body: bytes) -> tuple[str, dict[str, str], float]:
         body,
         backend_url=BACKEND_URL,
         hf_token=HF_TOKEN,
+        backend_auth_token=BACKEND_AUTH_TOKEN,
+        hf_spaces_auth_token=HF_SPACES_AUTH_TOKEN,
         hf_base=HF_BASE,
         default_model=DEFAULT_MODEL,
         hf_spaces_model_url=HF_SPACES_MODEL_URL,
@@ -749,62 +2798,203 @@ async def _validated_body(request: Request) -> bytes:
     HTTPException
         HTTP 413 when the body exceeds :data:`MAX_BODY_BYTES`.
     """
-    cl = _safe_int(request.headers.get("content-length"), -1)
-    if cl > MAX_BODY_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"Request body too large (Content-Length: {cl:,} bytes). "
-                f"Maximum allowed: {MAX_BODY_BYTES:,} bytes."
-            ),
-        )
-    body: bytes = await request.body()
-    if len(body) > MAX_BODY_BYTES:
-        raise HTTPException(
-            status_code=413,
-            detail=(
-                f"Request body too large ({len(body):,} bytes). "
-                f"Maximum allowed: {MAX_BODY_BYTES:,} bytes."
-            ),
-        )
-    return body
+    return await _read_limited_body(request, MAX_BODY_BYTES, "Request")
 
 
-async def _forward(body: bytes) -> Response:
+def _local_protocol_reason(exc: BaseException) -> str:
+    """Map a HTTPX local protocol exception to a privacy-safe fixed reason.
+
+    HTTP protocol exception messages may contain a rejected header value, so
+    callers must never log the raw exception text.  This helper inspects it
+    only to return one of a small fixed set of diagnostic labels.
     """
-    Forward *body* to the resolved upstream and return the response.
+    text = str(exc).lower()
+    if "illegal header value" in text:
+        return "illegal-header"
+    if "content-length" in text and "too much data" in text:
+        return "content-length-overrun"
+    if "content-length" in text and "too little data" in text:
+        return "content-length-underrun"
+    if "host" in text and ("mandatory" in text or "missing" in text):
+        return "missing-host"
+    if "request line" in text:
+        return "request-line"
+    return "unspecified"
 
-    Handles both non-streaming (JSON) and streaming (SSE) responses
-    transparently by detecting ``"stream": true`` in the request body.
 
-    Per-path timeouts are applied at the individual request level so slow
-    CPU (Path 2) and fast GPU (Path 3) requests do not interfere with each
-    other on the shared HTTP client.
+def _stub_mirror_context(body: bytes) -> dict[str, Any]:
+    """Return raw-wire identity plus the server-derived effective AI payload.
 
-    Parameters
-    ----------
-    body : bytes
-        Raw JSON request body from the browser.
+    ``stub/mirror`` is a chain-of-custody inspector.  The raw body proves what
+    crossed browser→proxy.  For ``scikitplot-chat-v1`` we additionally run the
+    *same* trusted contract transformation used by real requests and expose the
+    resulting provider payload to the stub renderer, but we stop before any
+    upstream HTTP call.  This lets maintainers inspect both boundaries without
+    granting client data system/developer authority.
+    """
+    context: dict[str, Any] = {
+        "wire_body_bytes": len(body),
+        "wire_body_sha256": hashlib.sha256(body).hexdigest(),
+    }
+    try:
+        raw = json.loads(body)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return context
+    if not isinstance(raw, dict) or raw.get("contract") not in SUPPORTED_CHAT_CONTRACTS:
+        return context
+    try:
+        req = parse_chat_request(
+            body,
+            allowed_models=(*tuple(ALLOWED_MODELS), "stub/mirror"),
+            allowed_namespaces=HF_SPACES_MODEL_NAMESPACES,
+        )
+        effective = build_upstream_payload(
+            req,
+            reasoning_enabled=REASONING_ENABLED,
+            effort_param=REASONING_EFFORT_PARAM if REASONING_ENABLED else "",
+            thinking_param=REASONING_THINKING_PARAM if REASONING_ENABLED else "",
+            thinking_mode=REASONING_THINKING_MODE,
+            budget_min=REASONING_BUDGET_MIN,
+            budget_max=REASONING_BUDGET_MAX,
+        )
+    except ChatContractError as exc:
+        context["effective_payload_error"] = _chat_contract_error_code(exc)
+        return context
+    context["effective_upstream_payload"] = effective
+    encoded = json.dumps(effective, ensure_ascii=False, separators=(",", ":")).encode(
+        "utf-8"
+    )
+    context["effective_upstream_bytes"] = len(encoded)
+    context["effective_upstream_sha256"] = hashlib.sha256(encoded).hexdigest()
+    return context
 
-    Returns
-    -------
-    fastapi.Response
-        Upstream response with original status code and content-type.
-        SSE streaming is preserved via :class:`~fastapi.responses.StreamingResponse`.
 
-    Notes
-    -----
-    **Developer note** — Error handling is explicit and specific:
+async def _stub_intercept(
+    body: bytes,
+    headers: Any,
+    *,
+    resources: list[dict[str, Any]] | None = None,
+    wire_stats: dict[str, Any] | None = None,
+) -> Response | None:
+    """Answer a reserved ``stub/*`` request locally, or return ``None``.
 
-    * ``httpx.ReadTimeout``    → HTTP 504 with actionable timeout message.
-    * ``httpx.ConnectTimeout`` → HTTP 504 with connect-specific message.
-    * ``httpx.RequestError``   → HTTP 502 Bad Gateway.
+    ``stub/*`` is a fail-closed namespace: once a request selects it, the
+    request is never forwarded to any real inference provider.  When the test
+    rig is disabled we return HTTP 503 locally.  This prevents a disabled stub
+    from accidentally entering Path 3 and turning a diagnostic request into an
+    upstream request.
 
-    These map to the correct HTTP semantics and allow the browser widget
-    to display a useful message rather than a generic "network error".
+    The slow-stub delay uses :func:`asyncio.sleep` so one diagnostic request
+    cannot block every other request on the FastAPI event loop.
+    """
+    try:
+        payload = json.loads(body)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict) or not is_stub_model(payload.get("model")):
+        return None
 
-    **Developer note** — SSE error events include a UUID so log aggregators
-    can correlate browser-visible errors to specific upstream failure events.
+    if not STUB_ENABLED:
+        logger.warning("AI proxy [STUB_DISABLED]: reserved stub model requested.")
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "type": "stub_disabled",
+                    "code": "stub_disabled",
+                    "message": (
+                        "The deterministic stub responder is disabled on this proxy."
+                    ),
+                }
+            },
+            headers={"X-Stub-Model": "disabled"},
+        )
+
+    model = payload.get("model")
+    mode, _arg = parse_stub_mode(model)
+    # Do not log the model/request body; mode is a fixed registry value and the
+    # body size is sufficient for diagnostics without exposing user content.
+    logger.info("stub request: mode=%s bytes=%d", mode, len(body))
+
+    mode_context: dict[str, Any] | None = None
+    if mode == "mirror":
+        mode_context = _stub_mirror_context(body)
+        if wire_stats:
+            mode_context.update(
+                {
+                    "wire_body_bytes": int(
+                        wire_stats.get("wire_body_bytes") or len(body)
+                    ),
+                    "wire_body_sha256": str(
+                        wire_stats.get("wire_body_sha256")
+                        or hashlib.sha256(body).hexdigest()
+                    ),
+                    "wire_multipart": bool(wire_stats.get("multipart")),
+                }
+            )
+        if resources:
+            mode_context["resources"] = resources
+
+    delay_ms = stub_delay_ms(model)
+    if delay_ms:
+        await asyncio.sleep(delay_ms / 1000.0)
+
+    # Error mode exists specifically to exercise the browser's HTTP failure
+    # path. A requested SSE transport must not accidentally turn that into a
+    # successful 200 stream.
+    if mode == "error":
+        status, doc = stub_payload(
+            model,
+            payload,
+            headers,
+            created=int(_time.time()),
+            mode_context=mode_context,
+        )
+        return JSONResponse(doc, status_code=status, headers={"X-Stub-Model": "true"})
+
+    if payload.get("stream"):
+        frames = stub_sse_frames(model, payload, headers, mode_context=mode_context)
+
+        async def _gen() -> AsyncGenerator[bytes, None]:
+            for frame in frames:
+                yield frame.encode()
+
+        return StreamingResponse(
+            _gen(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "X-Accel-Buffering": "no",
+                "X-Stub-Model": "true",
+            },
+        )
+
+    status, doc = stub_payload(
+        model, payload, headers, created=int(_time.time()), mode_context=mode_context
+    )
+    return JSONResponse(doc, status_code=status, headers={"X-Stub-Model": "true"})
+
+
+async def _forward(  # ruff: ignore[too-many-branches, too-many-return-statements]
+    body: bytes,
+    *,
+    structured_body: bytes | None = None,
+) -> Response:
+    """Forward one OpenAI-compatible request with mode-aware stream bridging.
+
+    Streaming is treated as a negotiated transport, not an assumption.  The
+    proxy opens the upstream request *before* returning a downstream 200, then
+    inspects the actual upstream ``Content-Type``:
+
+    * true ``text/event-stream`` responses are proxied incrementally;
+    * ordinary JSON responses stay ordinary JSON, even when the caller asked
+      for streaming (the panel already has a JSON fallback parser);
+    * pre-header transport/protocol failures become real HTTP 502/504 responses;
+    * mid-stream failures become explicit ``event: error`` SSE frames so the
+      panel cannot silently finalize an empty assistant bubble.
+
+    A remote protocol/read failure may be retried a bounded number of times
+    before any output is exposed.  Local protocol failures are never retried.
     """
     if _http_client is None:
         raise RuntimeError(
@@ -815,141 +3005,433 @@ async def _forward(body: bytes) -> Response:
     url, headers, read_timeout_s = _resolve_url(body)
     req_timeout = _make_timeout(read_timeout_s)
 
-    # Detect streaming intent before opening the upstream connection.
-    stream_requested: bool = False
+    # Path 2 is another bundled server-authoritative service.  Preserve the
+    # typed public contract across that hop so the model Space independently
+    # constructs its system policy instead of trusting proxy-authored messages.
+    # Path 1 custom backends and Path 3 provider APIs still receive the
+    # server-constructed provider body.
+    _path2_contract = bool(
+        structured_body is not None
+        and not BACKEND_URL
+        and HF_SPACES_MODEL_URL
+        and url.rstrip("/") == HF_SPACES_MODEL_URL.rstrip("/")
+    )
+    wire_body = structured_body if _path2_contract else body
+
+    stream_requested = False
     try:
-        payload: Any = json.loads(body)
+        payload: Any = json.loads(wire_body)
         stream_requested = bool(payload.get("stream", False))
     except (json.JSONDecodeError, ValueError, AttributeError, TypeError):
-        pass
+        payload = None
 
-    if stream_requested:
-
-        async def _sse_chunks() -> AsyncGenerator[bytes, None]:
-            """Async generator proxying upstream SSE frames to the browser."""
-            try:
-                async with _http_client.stream(  # type: ignore[union-attr]
-                    "POST", url, content=body, headers=headers, timeout=req_timeout
-                ) as upstream:
-                    if upstream.status_code != 200:  # noqa: PLR2004
-                        err_body = await upstream.aread()
-                        error_payload = json.dumps(
-                            {
-                                "id": f"err-{uuid.uuid4().hex}",
-                                "error": {
-                                    "status": upstream.status_code,
-                                    "message": err_body.decode(errors="replace")[:500],
-                                },
-                            }
-                        )
-                        yield f"data: {error_payload}\n\n".encode()
-                    else:
-                        async for chunk in upstream.aiter_bytes():
-                            yield chunk
-
-            except httpx.ReadTimeout:
-                err_id = uuid.uuid4().hex
-                logger.warning(
-                    "ReadTimeout after %.0f s on streaming request to %s [%s]",
-                    read_timeout_s,
-                    url,
-                    err_id,
-                )
-                yield f'data: {{"id":"err-{err_id}","error":{{"status":504,"message":'
-                yield (
-                    f'"Upstream timed out after {read_timeout_s:.0f} s. '
-                    f"CPU inference can take 4-5 minutes. "
-                    f'If using the ai-model Space, the model may still be loading."}}}}\n\n'
-                ).encode()
-
-            except httpx.ConnectTimeout:
-                err_id = uuid.uuid4().hex
-                logger.warning(
-                    "ConnectTimeout on streaming request to %s [%s]", url, err_id
-                )
-                yield (
-                    f'data: {{"id":"err-{err_id}","error":{{"status":504,"message":'
-                    f'"Connection timed out reaching {url}. '
-                    f'The HF Space may be starting up."}}}}\n\n'
-                ).encode()
-
-            except httpx.RequestError as exc:
-                err_id = uuid.uuid4().hex
-                logger.warning(
-                    "RequestError on streaming request to %s: %s [%s]",
-                    url,
-                    exc,
-                    err_id,
-                )
-                yield (
-                    f'data: {{"id":"err-{err_id}","error":{{"status":502,"message":'
-                    f'"Failed to reach upstream: {type(exc).__name__}"}}}}\n\n'
-                ).encode()
-
-        return StreamingResponse(
-            _sse_chunks(),
-            status_code=200,
-            media_type="text/event-stream",
-            headers={
-                "Cache-Control": "no-cache",
-                "X-Accel-Buffering": "no",
+    def _error_response(status: int, code: str, message: str) -> JSONResponse:
+        return JSONResponse(
+            status_code=status,
+            content={
+                "code": code,
+                "error": {"type": "upstream_error", "code": code, "message": message},
             },
+            headers={"Cache-Control": "no-store"},
         )
 
-    # Non-streaming path: await the full upstream response.
-    try:
-        upstream = await _http_client.post(
-            url, content=body, headers=headers, timeout=req_timeout
+    def _sse_error_frame(status: int, code: str, message: str) -> bytes:
+        err_id = uuid.uuid4().hex
+        doc = json.dumps(
+            {
+                "id": f"err-{err_id}",
+                "error": {"status": status, "code": code, "message": message},
+            },
+            separators=(",", ":"),
         )
-    except httpx.ReadTimeout:
+        return f"event: error\ndata: {doc}\n\n".encode()
+
+    def _body_with_stream(value: bool) -> bytes:
+        if not isinstance(payload, dict):
+            return wire_body
+        clone = dict(payload)
+        clone["stream"] = bool(value)
+        return json.dumps(clone, ensure_ascii=False, separators=(",", ":")).encode()
+
+    async def _post_buffered(  # ruff: ignore[too-many-return-statements]
+        request_body: bytes,
+    ) -> Response:
+        upstream: httpx.Response | None = None
+        try:
+            request = _http_client.build_request(
+                "POST", url, content=request_body, headers=headers, timeout=req_timeout
+            )
+            upstream = await _http_client.send(request, stream=True)
+            status = upstream.status_code
+            if status < 200 or status >= 300:  # ruff: ignore[magic-value-comparison]
+                code = _upstream_public_error_code(status)
+                logger.warning(
+                    "AI proxy [UPSTREAM_STATUS]: upstream rejected non-streaming request status=%d code=%s",
+                    status,
+                    code,
+                )
+                return _error_response(
+                    status, code, "The upstream AI provider rejected the request."
+                )
+            media_type = upstream.headers.get("content-type", "application/json")
+            content = await _read_upstream_limited(upstream)
+        except _UpstreamResponseTooLarge:
+            logger.warning(
+                "AI proxy [UPSTREAM_RESPONSE_LIMIT]: upstream response exceeded the application byte ceiling"
+            )
+            return _error_response(
+                502,
+                "upstream_response_too_large",
+                "The upstream response exceeded the proxy safety limit.",
+            )
+        except httpx.ReadTimeout:
+            logger.warning(
+                "AI proxy [UPSTREAM_TIMEOUT]: non-streaming request timed out after %.0f s",
+                read_timeout_s,
+            )
+            return _error_response(
+                504,
+                "upstream_timeout",
+                f"Upstream timed out after {read_timeout_s:.0f} s.",
+            )
+        except httpx.ConnectTimeout:
+            logger.warning(
+                "AI proxy [UPSTREAM_CONNECT_TIMEOUT]: non-streaming connect timed out"
+            )
+            return _error_response(
+                504,
+                "upstream_connect_timeout",
+                "Connection to the upstream timed out.",
+            )
+        except httpx.LocalProtocolError as exc:
+            logger.error(
+                "AI proxy [UPSTREAM_PROTOCOL_LOCAL]: local HTTP protocol validation failed reason=%s.",
+                _local_protocol_reason(exc),
+            )
+            return _error_response(
+                502,
+                "upstream_local_protocol_error",
+                "The proxy could not construct a valid upstream HTTP request.",
+            )
+        except httpx.RemoteProtocolError:
+            logger.warning(
+                "AI proxy [UPSTREAM_PROTOCOL_REMOTE]: upstream returned invalid/incomplete HTTP."
+            )
+            return _error_response(
+                502,
+                "upstream_remote_protocol_error",
+                "The upstream service returned an invalid or incomplete HTTP response.",
+            )
+        except httpx.RequestError as exc:
+            logger.warning(
+                "AI proxy [UPSTREAM_REQUEST_ERROR]: non-streaming upstream request failed (%s)",
+                type(exc).__name__,
+            )
+            return _error_response(
+                502,
+                "upstream_request_error",
+                "Failed to reach the upstream service.",
+            )
+        finally:
+            if upstream is not None and not upstream.is_closed:
+                await upstream.aclose()
+
+        return Response(
+            content=content,
+            status_code=status,
+            media_type=media_type,
+        )
+
+    if not stream_requested:
+        return await _post_buffered(wire_body)
+
+    # Streaming intent is advisory: ask upstream for SSE, but accept a normal
+    # JSON completion from a backend that does not implement streaming.
+    stream_headers = dict(headers)
+    stream_headers.setdefault("Accept", "text/event-stream, application/json")
+
+    upstream: httpx.Response | None = None
+    attempt = 0
+    while True:
+        try:
+            request = _http_client.build_request(
+                "POST",
+                url,
+                content=wire_body,
+                headers=stream_headers,
+                timeout=req_timeout,
+            )
+            upstream = await _http_client.send(request, stream=True)
+            break
+        except httpx.ReadTimeout:
+            logger.warning(
+                "AI proxy [UPSTREAM_TIMEOUT]: streaming request timed out before headers after %.0f s",
+                read_timeout_s,
+            )
+            return _error_response(
+                504,
+                "upstream_timeout",
+                f"Upstream timed out after {read_timeout_s:.0f} s.",
+            )
+        except httpx.ConnectTimeout:
+            logger.warning(
+                "AI proxy [UPSTREAM_CONNECT_TIMEOUT]: streaming connect timed out before headers"
+            )
+            return _error_response(
+                504,
+                "upstream_connect_timeout",
+                "Connection to the upstream timed out.",
+            )
+        except httpx.LocalProtocolError as exc:
+            logger.error(
+                "AI proxy [UPSTREAM_PROTOCOL_LOCAL]: local HTTP protocol validation failed before headers reason=%s.",
+                _local_protocol_reason(exc),
+            )
+            return _error_response(
+                502,
+                "upstream_local_protocol_error",
+                "The proxy could not construct a valid upstream HTTP request.",
+            )
+        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            if attempt < _protocol_retries:
+                attempt += 1
+                logger.warning(
+                    "AI proxy [UPSTREAM_PROTOCOL_RETRY]: retrying pre-output upstream stream (%s attempt=%d).",
+                    type(exc).__name__,
+                    attempt,
+                )
+                continue
+            logger.warning(
+                "AI proxy [UPSTREAM_PROTOCOL_REMOTE]: streaming upstream failed before headers (%s).",
+                type(exc).__name__,
+            )
+            return _error_response(
+                502,
+                "upstream_remote_protocol_error",
+                "The upstream service returned an invalid or incomplete HTTP response.",
+            )
+        except httpx.RequestError as exc:
+            logger.warning(
+                "AI proxy [UPSTREAM_REQUEST_ERROR]: streaming upstream request failed before headers (%s)",
+                type(exc).__name__,
+            )
+            return _error_response(
+                502,
+                "upstream_request_error",
+                "Failed to reach the upstream service.",
+            )
+
+    assert upstream is not None  # ruff: ignore[assert]
+
+    if upstream.status_code != 200:  # noqa: PLR2004
+        status = upstream.status_code
+        await upstream.aclose()
         logger.warning(
-            "ReadTimeout after %.0f s on non-streaming request to %s",
-            read_timeout_s,
-            url,
+            "AI proxy [UPSTREAM_STATUS]: upstream rejected streaming request status=%d",
+            status,
         )
-        return JSONResponse(
-            status_code=504,
-            content={
-                "error": {
-                    "type": "timeout_error",
-                    "message": (
-                        f"Upstream timed out after {read_timeout_s:.0f} s. "
-                        "CPU inference on the ai-model Space can take 4-5 minutes. "
-                        "The model may still be loading — retry in a few minutes."
-                    ),
-                }
-            },
-        )
-    except httpx.ConnectTimeout:
-        logger.warning("ConnectTimeout on non-streaming request to %s", url)
-        return JSONResponse(
-            status_code=504,
-            content={
-                "error": {
-                    "type": "timeout_error",
-                    "message": (
-                        f"Connection timed out reaching {url}. "
-                        "The HF Space may be cold-starting — retry in 30 seconds."
-                    ),
-                }
-            },
-        )
-    except httpx.RequestError as exc:
-        logger.warning("RequestError on non-streaming request to %s: %s", url, exc)
-        return JSONResponse(
-            status_code=502,
-            content={
-                "error": {
-                    "type": "upstream_error",
-                    "message": f"Failed to reach upstream: {type(exc).__name__}",
-                }
-            },
+        return _error_response(
+            status,
+            _upstream_public_error_code(status),
+            "The upstream AI provider rejected the request.",
         )
 
-    return Response(
-        content=upstream.content,
-        status_code=upstream.status_code,
-        media_type=upstream.headers.get("content-type", "application/json"),
+    try:
+        _check_upstream_declared_length(upstream)
+    except _UpstreamResponseTooLarge:
+        await upstream.aclose()
+        logger.warning(
+            "AI proxy [UPSTREAM_RESPONSE_LIMIT]: declared upstream response exceeded the application byte ceiling"
+        )
+        return _error_response(
+            502,
+            "upstream_response_too_large",
+            "The upstream response exceeded the proxy safety limit.",
+        )
+
+    content_type = (upstream.headers.get("content-type") or "").lower()
+    if "text/event-stream" not in content_type:
+        # The custom ai-model Space currently returns an ordinary OpenAI JSON
+        # response even when ``stream:true`` was requested.  Preserve that mode
+        # instead of falsely labelling raw JSON bytes as SSE (which the browser
+        # would correctly ignore, producing an empty answer).
+        try:
+            content = await _read_upstream_limited(upstream)
+        except _UpstreamResponseTooLarge:
+            await upstream.aclose()
+            logger.warning(
+                "AI proxy [UPSTREAM_RESPONSE_LIMIT]: buffered JSON fallback exceeded the application byte ceiling"
+            )
+            return _error_response(
+                502,
+                "upstream_response_too_large",
+                "The upstream response exceeded the proxy safety limit.",
+            )
+        except httpx.ReadTimeout:
+            await upstream.aclose()
+            logger.warning(
+                "AI proxy [UPSTREAM_TIMEOUT]: buffered JSON fallback timed out after %.0f s",
+                read_timeout_s,
+            )
+            return _error_response(
+                504,
+                "upstream_timeout",
+                "The upstream response timed out before it was complete.",
+            )
+        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            await upstream.aclose()
+            logger.warning(
+                "AI proxy [UPSTREAM_JSON_STREAM_FALLBACK]: buffered stream read failed (%s); retrying once without streaming.",
+                type(exc).__name__,
+            )
+            # No downstream bytes have been committed yet, so a single
+            # non-streaming retry cannot duplicate visible output.
+            return await _post_buffered(_body_with_stream(False))
+        except httpx.LocalProtocolError as exc:
+            await upstream.aclose()
+            logger.error(
+                "AI proxy [UPSTREAM_PROTOCOL_LOCAL]: local protocol failure while buffering JSON fallback reason=%s.",
+                _local_protocol_reason(exc),
+            )
+            return _error_response(
+                502,
+                "upstream_local_protocol_error",
+                "The proxy could not complete a valid upstream HTTP exchange.",
+            )
+        finally:
+            if not upstream.is_closed:
+                await upstream.aclose()
+
+        if not content.strip():
+            logger.warning(
+                "AI proxy [UPSTREAM_EMPTY_RESPONSE]: upstream returned HTTP 200 with an empty body."
+            )
+            return _error_response(
+                502,
+                "upstream_empty_response",
+                "The upstream service returned an empty response.",
+            )
+
+        # Some reverse proxies buffer a valid SSE response but lose or rewrite
+        # its Content-Type.  A bounded prefix sniff lets us recover that format
+        # without interpreting arbitrary provider payloads.
+        prefix = content.lstrip()[:32].lower()
+        if prefix.startswith((b"data:", b"event:")):
+            return Response(
+                content=content,
+                status_code=200,
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache, no-transform",
+                    "X-Accel-Buffering": "no",
+                },
+            )
+
+        return Response(
+            content=content,
+            status_code=200,
+            media_type=upstream.headers.get("content-type", "application/json"),
+        )
+
+    async def _sse_chunks() -> AsyncGenerator[bytes, None]:
+        """Proxy a confirmed SSE upstream and make terminal failures explicit."""
+        emitted = False
+        saw_data_field = False
+        probe_tail = b""
+        total_bytes = 0
+        try:
+            async for chunk in upstream.aiter_bytes():
+                if not chunk:
+                    continue
+                total_bytes += len(chunk)
+                if total_bytes > MAX_UPSTREAM_RESPONSE_BYTES:
+                    logger.warning(
+                        "AI proxy [UPSTREAM_RESPONSE_LIMIT]: SSE response exceeded the application byte ceiling"
+                    )
+                    yield _sse_error_frame(
+                        502,
+                        "upstream_response_too_large",
+                        "The upstream response exceeded the proxy safety limit.",
+                    )
+                    return
+                emitted = True
+                probe = probe_tail + chunk.lower()
+                if b"data:" in probe:
+                    saw_data_field = True
+                probe_tail = probe[-5:]
+                yield chunk
+            if not saw_data_field:
+                logger.warning(
+                    "AI proxy [UPSTREAM_EMPTY_STREAM]: SSE upstream ended without a data field."
+                )
+                yield _sse_error_frame(
+                    502,
+                    "upstream_empty_stream",
+                    "The upstream stream ended without a completion. Please retry.",
+                )
+        except asyncio.CancelledError:
+            logger.info(
+                "AI proxy [STREAM_CLOSED]: downstream streaming connection closed; upstream stream cancelled."
+            )
+            raise
+        except (BrokenPipeError, ConnectionResetError):
+            logger.warning(
+                "AI proxy [STREAM_CLOSED]: downstream pipe closed; stream ended safely."
+            )
+            return
+        except httpx.ReadTimeout:
+            logger.warning(
+                "AI proxy [UPSTREAM_TIMEOUT]: SSE body timed out after %.0f s",
+                read_timeout_s,
+            )
+            yield _sse_error_frame(
+                504,
+                "upstream_timeout",
+                "The upstream stream timed out. Please retry.",
+            )
+        except httpx.LocalProtocolError as exc:
+            logger.error(
+                "AI proxy [UPSTREAM_PROTOCOL_LOCAL]: local protocol failure during SSE body reason=%s.",
+                _local_protocol_reason(exc),
+            )
+            yield _sse_error_frame(
+                502,
+                "upstream_local_protocol_error",
+                "The proxy encountered an HTTP protocol error. Please retry.",
+            )
+        except (httpx.RemoteProtocolError, httpx.ReadError) as exc:
+            logger.warning(
+                "AI proxy [UPSTREAM_PROTOCOL_REMOTE]: SSE body ended unexpectedly (%s emitted=%s).",
+                type(exc).__name__,
+                emitted,
+            )
+            yield _sse_error_frame(
+                502,
+                "upstream_remote_protocol_error",
+                "The upstream stream closed unexpectedly. Please retry.",
+            )
+        except httpx.RequestError as exc:
+            logger.warning(
+                "AI proxy [UPSTREAM_REQUEST_ERROR]: SSE body failed (%s emitted=%s).",
+                type(exc).__name__,
+                emitted,
+            )
+            yield _sse_error_frame(
+                502,
+                "upstream_request_error",
+                "The upstream streaming connection failed. Please retry.",
+            )
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(
+        _sse_chunks(),
+        status_code=200,
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "X-Accel-Buffering": "no",
+        },
     )
 
 
@@ -993,78 +3475,446 @@ async def health_head() -> Response:
     return Response(status_code=200)
 
 
+def _contribution_pipeline_ready() -> bool:
+    """Return coarse contribution readiness without exposing ledger topology."""
+    if _CONTRIBUTION_LEDGER_CONFIG_ERROR:
+        return False
+    ledger = _CONTRIBUTION_LEDGER.manifest()
+    if not _CONTRIBUTION_LEDGER_READY:
+        return False
+    if CONTRIBUTION_REQUIRE_DURABLE and not bool(ledger.get("durable")):
+        return False
+    if CONTRIBUTION_REQUIRE_SHARED and not (
+        bool(ledger.get("shared")) and bool(ledger.get("authoritative"))
+    ):
+        return False
+    return _STORAGE.primary_ready()
+
+
+def _share_store_public_status() -> dict[str, Any]:
+    """Expose only coarse Share lifecycle properties; never connection details."""
+    manifest = _SHARE_STORE.manifest()
+    ready = bool(_SHARE_STORE_READY and not _SHARE_STORE_CONFIG_ERROR)
+    if SHARE_REQUIRE_DURABLE and not bool(manifest.get("durable")):
+        ready = False
+    if SHARE_REQUIRE_SHARED and not (
+        bool(manifest.get("shared")) and bool(manifest.get("authoritative"))
+    ):
+        ready = False
+    return {
+        "ready": ready,
+        "backend": manifest.get("backend"),
+        "durability": manifest.get("durability"),
+        "durable": bool(manifest.get("durable")),
+        "shared": bool(manifest.get("shared")),
+        "authoritative": bool(manifest.get("authoritative")),
+        "consistency_scope": manifest.get("consistency_scope"),
+        "required_durable": SHARE_REQUIRE_DURABLE,
+        "required_shared": SHARE_REQUIRE_SHARED,
+    }
+
+
+def _require_share_store_ready() -> dict[str, Any]:
+    status = _share_store_public_status()
+    if not status["ready"]:
+        raise HTTPException(
+            status_code=503,
+            detail="Global Share lifecycle storage is unavailable for this deployment.",
+        )
+    return status
+
+
+def _sync_share_store_runtime_limits() -> None:
+    """Keep backend limits aligned with runtime config/test overrides."""
+    if hasattr(_SHARE_STORE, "max_entries"):
+        _SHARE_STORE.max_entries = int(SHARE_MAX_ENTRIES)
+    if hasattr(_SHARE_STORE, "max_total_bytes"):
+        _SHARE_STORE.max_total_bytes = int(SHARE_MAX_TOTAL_BYTES)
+
+
+def _share_store_http_error(exc: ShareStoreError) -> HTTPException:
+    mapping = {
+        "NOT_FOUND": (404, "Share not found or expired."),
+        "EXPIRED": (410, "Share has expired."),
+        "AUTH": (403, "Invalid share edit capability."),
+        "DUPLICATE_SHARE": (409, "Share operation already exists."),
+        "ENTRY_CAPACITY": (507, "Share storage entry capacity reached."),
+        "BYTE_CAPACITY": (507, "Share storage byte capacity reached."),
+    }
+    status, detail = mapping.get(exc.code, (503, "Share storage unavailable."))
+    return HTTPException(status_code=status, detail=detail)
+
+
+def _operation_envelope(
+    request: Request, payload: dict[str, Any], purpose: str, *, max_age_ms: int
+) -> tuple[str, str, str] | None:
+    """Resolve a create-once envelope without receiving the raw management capability.
+
+    The browser creates the public resource locator and the management token
+    before the request, but transmits only ``SHA-256(management_token)``.  The
+    server therefore has enough information to authorize later revoke/delete
+    operations without ever seeing the create-time bearer capability itself.
+    ``purpose`` is retained in the signature to keep call sites explicit.
+    """
+    del payload, purpose  # operation metadata is header-only; never content JSON
+    op_id = request.headers.get("X-AI-Operation-Id")
+    resource_id = request.headers.get("X-AI-Resource-Id")
+    token_hash = request.headers.get("X-AI-Management-Token-Hash")
+    created_raw = request.headers.get("X-AI-Operation-Created-At")
+    if (
+        op_id is None
+        and resource_id is None
+        and token_hash is None
+        and created_raw is None
+    ):
+        return None
+    if (
+        not isinstance(op_id, str)
+        or not (16 <= len(op_id) <= 128)  # ruff: ignore[magic-value-comparison]
+        or any(
+            ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-"
+            for ch in op_id
+        )
+    ):
+        raise HTTPException(status_code=422, detail="Invalid operationId.")
+    if (
+        not isinstance(resource_id, str)
+        or len(resource_id) != 32  # ruff: ignore[magic-value-comparison]
+        or any(ch not in "0123456789abcdefABCDEF" for ch in resource_id)
+    ):
+        raise HTTPException(
+            status_code=422, detail="Invalid operation resource locator."
+        )
+    if (
+        not isinstance(token_hash, str)
+        or len(token_hash) != 64  # ruff: ignore[magic-value-comparison]
+        or any(ch not in "0123456789abcdefABCDEF" for ch in token_hash)
+    ):
+        raise HTTPException(
+            status_code=422, detail="Invalid management capability digest."
+        )
+    try:
+        created_at = int(created_raw)
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422, detail="Invalid operationCreatedAt."
+        ) from exc
+    now_ms = int(_time.time() * 1000)
+    if (
+        created_at > now_ms + 300_000
+        or created_at <= 0
+        or now_ms - created_at > max(60_000, int(max_age_ms))
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="Operation recovery window has expired; start a new reviewed operation.",
+        )
+    return resource_id.lower(), token_hash.lower(), op_id
+
+
+def _canonical_payload_digest(value: Any) -> str:
+    encoded = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _cors_public_status() -> dict[str, Any]:
+    """Return public CORS diagnostics without exposing custom/private origins."""
+    wildcard = _allowed_origins == ["*"]
+    primary_default = _DEFAULT_ALLOWED_ORIGINS[0]
+    return {
+        # Backward-compatible singular fields refer to the primary project origin.
+        "official_docs_origin": primary_default,
+        "official_docs_origin_allowed": wildcard or primary_default in _allowed_origins,
+        "default_allowed_origin_count": len(_DEFAULT_ALLOWED_ORIGINS),
+        "default_allowed_origins_allowed": (
+            wildcard
+            or all(origin in _allowed_origins for origin in _DEFAULT_ALLOWED_ORIGINS)
+        ),
+        "wildcard": wildcard,
+        "allowed_origin_count": None if wildcard else len(_allowed_origins),
+        "env_semantics": ALLOWED_ORIGINS_MODE,
+        "share_opaque_origin_allowed": SHARE_ALLOW_OPAQUE_ORIGIN,
+        "share_opaque_origin_write_allowed": bool(
+            SHARE_ALLOW_OPAQUE_ORIGIN and SHARE_ALLOW_OPAQUE_ORIGIN_WRITE
+        ),
+    }
+
+
 @app.get("/")
 async def root() -> JSONResponse:
-    """
-    Human-readable status page and HF Space health-check handler.
-
-    Returns
-    -------
-    JSONResponse
-        HTTP 200 with service status and the active routing configuration.
-
-    Notes
-    -----
-    **User note** — The ``timeouts`` field shows read timeouts in seconds
-    per path.  ``path2`` corresponds to the ai-model Space (CPU inference,
-    default 600 s).  ``path3`` corresponds to the HF Serverless API (GPU,
-    default 120 s).
-    """
+    """Public status/discovery with privacy-minimized collection capabilities."""
+    storage_manifest = _STORAGE.manifest()
+    storage_targets = (
+        storage_manifest.get("targets", [])
+        if isinstance(storage_manifest, dict)
+        else []
+    )
     return JSONResponse(
         {
             "status": "ok",
-            "service": f"sphinx-ai-assistant proxy v{PROXY_VERSION}",
-            "routing": {
-                "path_1_backend_url": BACKEND_URL or None,
-                "path_2_model_space_url": HF_SPACES_MODEL_URL or None,
-                "path_2_namespaces": list(HF_SPACES_MODEL_NAMESPACES),
-                "path_3_hf_api_base": HF_BASE,
-                "path_3_hf_token_set": bool(HF_TOKEN),
+            "service": "sphinx-ai-assistant proxy",
+            "version": PROXY_VERSION,
+            "deployment": _deployment_public_status(),
+            "capabilities": _public_capabilities(),
+            "training": {
+                "dataset_repo": None,
+                "contribute_ready": _contribution_pipeline_ready(),
+                "feedback_persist_enabled": FEEDBACK_PERSIST_ENABLED,
+                "feedback_telemetry_schema_version": FEEDBACK_TELEMETRY_SCHEMA_VERSION,
+                "feedback_telemetry_consent_version": (
+                    FEEDBACK_TELEMETRY_CONSENT_VERSION
+                ),
+                "feedback_review_mode": FEEDBACK_REVIEW_MODE,
+                "feedback_review_ready": _feedback_review_pipeline_ready(),
+                "feedback_review_consent_version": FEEDBACK_REVIEW_CONSENT_VERSION,
+                "feedback_training_consent_version": FEEDBACK_TRAINING_CONSENT_VERSION,
+                "feedback_review_updates": True,
+                "contribution_review_mode": CONTRIBUTION_REVIEW_MODE,
+                "pending_review_updates": True,
+                "duplicate_resubmit_policy": "same-receipt-noop-or-update",
+                "canonical_branch": getattr(
+                    getattr(_STORAGE, "primary", None), "branch", None
+                ),
             },
             "tokens": {
-                # Never expose token values — only whether each slot is filled.
-                # hf_token_type / hf_write_token_type reflect the classified token
-                # class so operators can verify least-privilege configuration without
-                # reading Space logs.  Possible values: fine-grained | read | write |
-                # unknown.  "unknown" means the type could not be inferred — set
-                # HF_TOKEN_TYPE / HF_WRITE_TOKEN_TYPE in Space secrets to resolve.
-                "hf_token_set": bool(HF_TOKEN),
-                "hf_token_type": HF_TOKEN_TYPE,
-                "hf_write_token_set": bool(HF_WRITE_TOKEN),
-                "hf_write_token_type": HF_WRITE_TOKEN_TYPE,
-                # True when HF_WRITE_TOKEN is set; False means writes fall
-                # back to HF_TOKEN (single-token mode, less secure).
-                "least_privilege_mode": bool(HF_WRITE_TOKEN),
-            },
-            "training": {
-                "dataset_repo": TRAINING_DATASET_REPO or None,
-                "contribute_ready": bool(TRAINING_DATASET_REPO and HF_DATASET_TOKEN),
-                "feedback_persist_enabled": FEEDBACK_PERSIST_ENABLED,
-            },
-            "timeouts": {
-                "path1_s": _proxy_timeout_secs,
-                "path2_s": _path2_timeout_secs,
-                "path3_s": _path3_timeout_secs,
-                "connect_s": _connect_timeout_secs,
-                "write_s": _write_timeout_secs,
-            },
-            "cors_origins": _allowed_origins,
-            "endpoints": {
-                "chat": "POST /v1/chat/completions (primary)",
-                "share": "POST /v1/share            (conversation share)",
-                "share_get": "GET  /v1/share/{uuid}     (retrieve shared snapshot)",
-                "share_patch": (
-                    "PATCH /v1/share/{uuid}    (update snapshot, URL preserved)"
+                "hf_token_type": "unknown",
+                "hf_dataset_token_type": "unknown",
+                "hf_write_token_type": "unknown",
+                "least_privilege_mode": bool(
+                    HF_DATASET_TOKEN_EXPLICIT or HF_WRITE_TOKEN
                 ),
-                "feedback": "POST /v1/feedback         (rating persistence)",
-                "training": "POST /v1/contribute       (GDPR-gated training data)",
-                "alias": "POST /                    (path-agnostic alias)",
-                "health": "GET  /health              (liveness probe)",
-                "head_root": "HEAD /                    (health-monitor probe)",
-                "head_health": "HEAD /health              (health-monitor probe)",
             },
-        }
+            "storage": {
+                "configured": bool(storage_targets),
+                "target_count": len(storage_targets),
+                "primary_ready": _STORAGE.primary_ready(),
+            },
+            "share": _share_store_public_status(),
+            "rate_limit": {
+                "backend": RATE_LIMIT_BACKEND,
+                "shared": RATE_LIMIT_BACKEND == "redis",
+                "authoritative": RATE_LIMIT_BACKEND == "redis",
+                "ready": (
+                    (RATE_LIMIT_BACKEND == "redis" and _SHARED_RATE_LIMITER_READY)
+                    or (RATE_LIMIT_BACKEND == "local" and not RATE_LIMIT_REQUIRE_SHARED)
+                ),
+                "required_shared": RATE_LIMIT_REQUIRE_SHARED,
+                "scope": (
+                    "single_redis_consistency_domain"
+                    if RATE_LIMIT_BACKEND == "redis"
+                    else "process_local"
+                ),
+            },
+            "limits": {"max_upstream_response_bytes": MAX_UPSTREAM_RESPONSE_BYTES},
+            "cors": _cors_public_status(),
+        },
+        headers={"Cache-Control": "no-store"},
     )
+
+
+def _reasoning_capability() -> dict:
+    """Describe the reasoning parameters this proxy forwards.
+
+    Returned inside ``/health`` so the documentation panel can discover what
+    to send instead of relying on a hand-written declaration in the site's
+    ``conf.py`` -- which states a fact about this proxy from another
+    repository and goes stale the moment this one changes.
+
+    Returns
+    -------
+    dict
+        ``{"reasoning": {...}}``.  ``enabled`` is ``False`` unless
+        ``REASONING_ENABLED`` is set, and an explicit ``False`` is a useful
+        answer in its own right: it pins the panel's controls to the
+        provider's defaults even where the site optimistically enabled them.
+
+    Notes
+    -----
+    **Developer note** -- The effort map is sent in full for all five panel
+    levels.  A partial map would leave the unmapped levels silently sending
+    nothing, so the panel rejects one; sending every level keeps this endpoint
+    the single place where the mapping is decided.  ``extra`` and ``max``
+    collapse onto the top value of the three-value OpenAI-compatible scale.
+
+    **Security note** -- This response is untrusted input from the panel's
+    point of view, and the panel validates it accordingly: field names must
+    match a strict pattern and miss a reserved list, so nothing declared here
+    can override ``model``, ``messages``, or any other field that decides what
+    is sent or to whom.  Widening what this returns will not widen what the
+    panel accepts.
+    """
+    if not REASONING_ENABLED:
+        return {
+            "reasoning": {"enabled": False},
+            "chat_request": _chat_request_capability(),
+            "stub": _stub_capability(),
+        }
+
+    caps: dict = {
+        "enabled": True,
+        "budget_min": REASONING_BUDGET_MIN,
+        "budget_max": REASONING_BUDGET_MAX,
+    }
+    caps["effort_enabled"] = bool(REASONING_EFFORT_PARAM)
+    caps["thinking_enabled"] = bool(REASONING_THINKING_PARAM)
+    if REASONING_EFFORT_PARAM:
+        caps["effort_param"] = REASONING_EFFORT_PARAM
+        caps["effort_values"] = {
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "extra": "high",
+            "max": "high",
+        }
+    if REASONING_THINKING_PARAM:
+        caps["thinking_param"] = REASONING_THINKING_PARAM
+        caps["thinking_mode"] = REASONING_THINKING_MODE
+    return {
+        "reasoning": caps,
+        "chat_request": _chat_request_capability(),
+        "stub": _stub_capability(),
+    }
+
+
+def _chat_request_capability() -> dict:
+    """Advertise every accepted chat contract plus the history bounds.
+
+    ``contract`` keeps naming the *baseline* v1 envelope so a browser built
+    before history existed reads the same value it always read.  Newer clients
+    read ``contracts`` and negotiate upward.  The bounds are published because
+    a client that cannot see them can only discover them by having a request
+    rejected, and a planner that has to guess its own budget will guess wrong.
+    """
+    return {
+        "contract": CHAT_CONTRACT,
+        "contracts": list(SUPPORTED_CHAT_CONTRACTS),
+        "history": {
+            "max_turns": MAX_HISTORY_TURNS,
+            "max_turn_chars": MAX_HISTORY_TURN_CHARS,
+            "max_total_chars": MAX_HISTORY_TOTAL_CHARS,
+            "roles": ["user", "assistant"],
+        },
+        "working_files": {
+            "max_files": MAX_WORKING_FILES,
+            "max_file_chars": MAX_WORKING_FILE_CHARS,
+            "max_total_chars": MAX_WORKING_FILE_TOTAL_CHARS,
+            "digest": "sha256",
+        },
+    }
+
+
+def _public_capabilities() -> dict:
+    """Return browser-visible proxy capabilities with no provider credentials."""
+    caps = dict(_reasoning_capability())
+    model_routes = {
+        model: _resource_capability_doc(model) for model in ALLOWED_MODELS[:32]
+    }
+    if STUB_ENABLED:
+        model_routes["stub/mirror"] = _resource_capability_doc("stub/mirror")
+    caps["resource_transport"] = {
+        "version": 3,
+        "multipart": True,
+        "max_files": 256,
+        "max_file_bytes": RESOURCE_MAX_FILE_BYTES,
+        "max_total_bytes": RESOURCE_MAX_TOTAL_BYTES,
+        "modalities": [
+            "text",
+            "image",
+            "animated_image",
+            "vector_image",
+            "audio",
+            "video",
+            "document",
+            "archive",
+            "data",
+            "binary",
+        ],
+        "intents": ["auto", "raw", "extract", "context"],
+        "routing": "server-adapter",
+        "execution": "enabled",
+        "model_capability_endpoint": "/v1/resource-capabilities",
+        "models": model_routes,
+    }
+    _artifact_lifecycle_manifest = _PROVIDER_ARTIFACT_LIFECYCLE.manifest()
+    _artifact_lifecycle_usable = (
+        not _PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR
+        and bool(_PROVIDER_ARTIFACT_LIFECYCLE_READY)
+        and (
+            not PROVIDER_ARTIFACT_LIFECYCLE_REQUIRE_SHARED
+            or (
+                bool(_artifact_lifecycle_manifest.get("shared"))
+                and bool(_artifact_lifecycle_manifest.get("authoritative"))
+            )
+        )
+    )
+    generators = (
+        [
+            spec.as_public_dict()
+            for spec in _PROVIDER_ARTIFACT_OUTPUT_REGISTRY.public_specs()
+        ]
+        if _artifact_lifecycle_usable
+        else []
+    )
+    caps["provider_artifact_output"] = {
+        "version": 2,
+        "contract": PROVIDER_ARTIFACT_CONTRACT,
+        "receipt_contract": PROVIDER_ARTIFACT_RECEIPT_CONTRACT,
+        "endpoint": "/v1/artifacts/provider-output",
+        "max_request_bytes": PROVIDER_ARTIFACT_MAX_REQUEST_BYTES,
+        "max_prompt_chars": PROVIDER_ARTIFACT_MAX_PROMPT_CHARS,
+        "max_output_bytes": PROVIDER_ARTIFACT_MAX_OUTPUT_BYTES,
+        "lifecycle_contract": PROVIDER_ARTIFACT_LIFECYCLE_CONTRACT,
+        "cancel_contract": PROVIDER_ARTIFACT_CANCEL_CONTRACT,
+        "cancel_endpoint": "/v1/artifacts/provider-output/cancel",
+        "candidate_ttl_seconds": PROVIDER_ARTIFACT_CANDIDATE_TTL_SECONDS,
+        "duplicate_window_seconds": PROVIDER_ARTIFACT_DUPLICATE_WINDOW_SECONDS,
+        "lifecycle_authority": {
+            "backend": _artifact_lifecycle_manifest.get("backend"),
+            "shared": bool(_artifact_lifecycle_manifest.get("shared")),
+            "authoritative": bool(_artifact_lifecycle_manifest.get("authoritative")),
+            "ready": bool(_artifact_lifecycle_usable),
+        },
+        "generators": generators,
+        "chat_text_is_output_authority": False,
+        "resource_input_is_output_authority": False,
+    }
+    caps["zip_edit_artifact"] = {
+        "version": 1,
+        "contract": ZIP_EDIT_CONTRACT,
+        "receipt_contract": ZIP_EDIT_RECEIPT_CONTRACT,
+        "endpoint": "/v1/artifacts/zip-edit",
+        "multipart": True,
+        "max_request_bytes": ZIP_EDIT_MAX_REQUEST_BYTES,
+        "max_source_bytes": ZIP_EDIT_MAX_SOURCE_BYTES,
+        "max_entry_bytes": ZIP_EDIT_MAX_ENTRY_BYTES,
+        "max_replacement_total_bytes": ZIP_EDIT_MAX_REPLACEMENT_TOTAL_BYTES,
+        "max_authorized_paths": 4096,
+        "max_replacements": 256,
+        "tree_authority": "source-archive",
+    }
+    return caps
+
+
+def _stub_capability() -> dict:
+    """Advertise the stub rig and the modes this deployment actually supports.
+
+    Read from the mode registry rather than a literal list, so a deployment
+    that registers an extra mode advertises it without a second edit -- and a
+    client can discover the real set instead of assuming one that may be older
+    than the server.
+
+    Returns
+    -------
+    dict
+        ``{"enabled": bool, "prefix": "stub/", "modes": {name: summary}}``.
+        ``modes`` is omitted when disabled: a disabled rig should not publish
+        a menu of scenarios it will not run.
+    """
+    if not STUB_ENABLED:
+        return {"enabled": False}
+    return {"enabled": True, "prefix": "stub/", "modes": stub_modes()}
 
 
 @app.get("/health")
@@ -1077,18 +3927,881 @@ async def health() -> JSONResponse:
     JSONResponse
         Always HTTP 200 while the process is running.
     """
-    return JSONResponse({"status": "ok", "version": PROXY_VERSION})
+    return JSONResponse(
+        {
+            "status": "ok",
+            "version": PROXY_VERSION,
+            "deployment": _deployment_public_status(),
+            "capabilities": _public_capabilities(),
+            "share": _share_store_public_status(),
+            "rate_limit": {
+                "backend": RATE_LIMIT_BACKEND,
+                "shared": RATE_LIMIT_BACKEND == "redis",
+                "authoritative": RATE_LIMIT_BACKEND == "redis",
+                "ready": (
+                    (RATE_LIMIT_BACKEND == "redis" and _SHARED_RATE_LIMITER_READY)
+                    or (RATE_LIMIT_BACKEND == "local" and not RATE_LIMIT_REQUIRE_SHARED)
+                ),
+                "required_shared": RATE_LIMIT_REQUIRE_SHARED,
+            },
+            "limits": {"max_upstream_response_bytes": MAX_UPSTREAM_RESPONSE_BYTES},
+            "cors": _cors_public_status(),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _chat_contract_error_code(exc: ChatContractError) -> str:
+    """Map a local chat-contract rejection to a bounded public reason code."""
+    text = str(exc)
+    if text == "requested model is not allowed by this proxy" or text.startswith(
+        "model "
+    ):
+        return "PROXY_MODEL_NOT_ALLOWED"
+    if text.startswith("context") or "context field" in text:
+        return "PROXY_CONTEXT_INVALID"
+    if text.startswith("reasoning") or "reasoning field" in text:
+        return "PROXY_REASONING_INVALID"
+    if text.startswith("user_message"):
+        return "PROXY_USER_MESSAGE_INVALID"
+    return "PROXY_CHAT_CONTRACT_INVALID"
+
+
+def _chat_contract_error_response(exc: ChatContractError) -> JSONResponse:
+    """Return a privacy-safe machine-readable local 400 response."""
+    code = _chat_contract_error_code(exc)
+    logger.warning("AI proxy [%s]: chat request rejected locally.", code)
+    return JSONResponse(
+        status_code=400,
+        content={
+            "code": code,
+            "error": {
+                "type": "proxy_request_rejected",
+                "code": code,
+                "message": "The AI proxy rejected the request before provider routing.",
+            },
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _upstream_public_error_code(status: int) -> str:
+    """Map provider HTTP status to the browser's bounded diagnostic vocabulary."""
+    if status in {401, 403}:
+        return "UPSTREAM_AUTH_OR_ACCESS_REJECTED"
+    if status == 404:  # ruff: ignore[magic-value-comparison]
+        return "UPSTREAM_MODEL_OR_ROUTE_NOT_FOUND"
+    if status == 429:  # ruff: ignore[magic-value-comparison]
+        return "UPSTREAM_RATE_LIMITED"
+    if 500 <= status <= 599:  # ruff: ignore[magic-value-comparison]
+        return "UPSTREAM_SERVICE_ERROR"
+    return "UPSTREAM_REQUEST_REJECTED"
+
+
+def _server_owned_chat_body(body: bytes) -> bytes:
+    """Validate the public chat envelope and build the provider request."""
+    req = parse_chat_request(
+        body,
+        allowed_models=ALLOWED_MODELS,
+        allowed_namespaces=HF_SPACES_MODEL_NAMESPACES,
+    )
+    if req.resources:
+        raise ChatContractError("resources require multipart/form-data transport")
+    return encode_upstream_payload(
+        req,
+        reasoning_enabled=REASONING_ENABLED,
+        effort_param=REASONING_EFFORT_PARAM if REASONING_ENABLED else "",
+        thinking_param=REASONING_THINKING_PARAM if REASONING_ENABLED else "",
+        thinking_mode=REASONING_THINKING_MODE,
+        budget_min=REASONING_BUDGET_MIN,
+        budget_max=REASONING_BUDGET_MAX,
+    )
+
+
+def _resource_transport_error_response(exc: ResourceTransportError) -> JSONResponse:
+    """Map multipart/resource failures to a bounded public response."""
+    text = str(exc).lower()
+    status = (
+        413 if ("limit" in text or "too large" in text or "exceeded" in text) else 400
+    )
+    code = (
+        "PROXY_RESOURCE_TOO_LARGE"
+        if status == 413  # ruff: ignore[magic-value-comparison]
+        else "PROXY_RESOURCE_INVALID"
+    )
+    logger.warning("AI proxy [%s]: resource request rejected locally.", code)
+    return JSONResponse(
+        status_code=status,
+        content={
+            "code": code,
+            "error": {
+                "type": "proxy_request_rejected",
+                "code": code,
+                "message": "The AI proxy rejected a resource before provider routing.",
+            },
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def _chat_request_transport(
+    request: Request,
+) -> tuple[bytes, Any, tuple[ResourceUpload, ...], dict[str, Any]]:
+    """Read JSON-only or multipart ``scikitplot-chat-v1`` without flattening files."""
+    content_type = request.headers.get("content-type", "").lower()
+    if content_type.startswith("multipart/form-data"):
+        body, chat, uploads, stats = await parse_resource_chat_request(
+            request,
+            allowed_models=tuple(ALLOWED_MODELS)
+            + tuple("stub/" + mode for mode in stub_modes()),
+            allowed_namespaces=HF_SPACES_MODEL_NAMESPACES,
+            max_request_bytes=RESOURCE_MAX_REQUEST_BYTES,
+            max_file_bytes=RESOURCE_MAX_FILE_BYTES,
+            max_resource_bytes=RESOURCE_MAX_TOTAL_BYTES,
+        )
+        return body, chat, uploads, stats
+
+    body = await _validated_body(request)
+    chat = parse_chat_request(
+        body,
+        allowed_models=tuple(ALLOWED_MODELS)
+        + tuple("stub/" + mode for mode in stub_modes()),
+        allowed_namespaces=HF_SPACES_MODEL_NAMESPACES,
+    )
+    if chat.resources:
+        raise ResourceTransportError("declared resources require multipart/form-data")
+    return (
+        body,
+        chat,
+        (),
+        {
+            "multipart": False,
+            "wire_body_bytes": len(body),
+            "wire_body_sha256": hashlib.sha256(body).hexdigest(),
+        },
+    )
+
+
+async def _close_resource_uploads(uploads: tuple[ResourceUpload, ...]) -> None:
+    for row in uploads:
+        try:  # ruff: ignore[suppressible-exception]
+            await row.close()
+        except Exception:  # noqa: BLE001  # ruff: ignore[try-except-in-loop]
+            pass
+
+
+def _resource_route_doc(routes: tuple[Any, ...]) -> list[dict[str, Any]]:
+    """Return bounded provider-neutral route diagnostics without private handles."""
+    return [
+        {
+            "resource_id": row.resource_id,
+            "route": row.route,
+            "reason": row.reason,
+            "metadata": row.metadata,
+        }
+        for row in routes
+    ]
+
+
+def _resource_execution_error_response(
+    exc: ResourceExecutionError,
+    *,
+    adapter_name: str,
+    routes: tuple[Any, ...],
+) -> JSONResponse:
+    """Map provider-resource execution failures to a bounded public vocabulary."""
+    text = str(exc).lower()
+    if "not enabled" in text:
+        status = 501
+        code = "PROXY_RESOURCE_EXECUTOR_PENDING"
+        public_type = "resource_executor_pending"
+        message = (
+            "Resource routing is planned but this provider executor is not enabled yet."
+        )
+    elif (
+        "50 mib" in text or "limit" in text or "too large" in text or "exceeded" in text
+    ):
+        status = 413
+        code = "PROXY_RESOURCE_TOO_LARGE"
+        public_type = "proxy_request_rejected"
+        message = "The resource request exceeds the selected provider route limit."
+    elif "route" in text or "modality" in text or "unsupported" in text:
+        status = 400
+        code = "PROXY_RESOURCE_ROUTE_UNSUPPORTED"
+        public_type = "proxy_request_rejected"
+        message = "The selected provider cannot execute one or more requested resource routes."
+    else:
+        status = 502
+        code = "UPSTREAM_RESOURCE_EXECUTION_FAILED"
+        public_type = "upstream_error"
+        message = "The upstream AI provider could not execute the resource request."
+    logger.warning(
+        "AI proxy [%s]: resource execution failed adapter=%s.", code, adapter_name
+    )
+    return JSONResponse(
+        status_code=status,
+        content={
+            "code": code,
+            "error": {"type": public_type, "code": code, "message": message},
+            "resource_adapter": adapter_name,
+            "resource_routes": _resource_route_doc(routes),
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+def _enforce_executor_route_constraints(
+    *,
+    executor: Any,
+    model: str,
+    routes: tuple[Any, ...],
+    uploads: tuple[ResourceUpload, ...],
+) -> None:
+    """Enforce executor route limits before provider preparation/I/O."""
+    fn = getattr(executor, "route_constraints", None)
+    raw = fn(model) if callable(fn) else {}
+    if not isinstance(raw, dict):
+        return
+    by_id = {row.verified.id: row for row in uploads}
+    counts: dict[tuple[str, str], int] = {}
+    for route in routes:
+        upload = by_id.get(route.resource_id)
+        if upload is None:
+            raise ResourceExecutionError("resource route/upload identity mismatch")
+        modality = str(
+            route.metadata.get("modality", upload.verified.detected_modality)
+        )
+        rows = raw.get(modality)
+        spec = rows.get(route.route) if isinstance(rows, dict) else None
+        if not isinstance(spec, dict):
+            continue
+        max_bytes = spec.get("max_file_bytes")
+        if max_bytes is not None and int(upload.verified.actual_size) > int(max_bytes):
+            raise ResourceExecutionError("selected provider route file limit exceeded")
+        mimes = spec.get("mime_types")
+        if isinstance(mimes, (list, tuple)) and mimes:
+            allowed = {str(row).strip().lower() for row in mimes}
+            if str(upload.verified.detected_mime or "").lower() not in allowed:
+                raise ResourceExecutionError(
+                    "selected provider route MIME is unsupported"
+                )
+        max_files = spec.get("max_files")
+        if max_files is not None:
+            key = (modality, route.route)
+            counts[key] = counts.get(key, 0) + 1
+            if counts[key] > int(max_files):
+                raise ResourceExecutionError(
+                    "selected provider route file-count limit exceeded"
+                )
+
+
+async def _execute_resource_chat(  # ruff: ignore[too-many-return-statements]
+    *,
+    chat_req: Any,
+    uploads: tuple[ResourceUpload, ...],
+) -> Response:
+    """Plan, prepare, execute and clean one first-class provider resource chat."""
+    adapter_name = _resource_adapter_name_for_model(chat_req.model)
+    adapter = _RESOURCE_PROVIDER_REGISTRY.get(adapter_name)
+    routes = tuple(await adapter.route_resources(chat_req.model, uploads))
+    executor = _RESOURCE_EXECUTOR_REGISTRY.get(adapter_name)
+    if not bool(getattr(executor, "enabled", False)):
+        return _resource_execution_error_response(
+            ResourceExecutionError(f"{adapter_name} resource executor is not enabled"),
+            adapter_name=adapter_name,
+            routes=routes,
+        )
+    if not all(
+        hasattr(executor, name)
+        for name in ("open_chat", "buffered_chat_response", "chat_sse")
+    ):
+        return _resource_execution_error_response(
+            ResourceExecutionError(
+                "provider resource executor has no chat execution boundary"
+            ),
+            adapter_name=adapter_name,
+            routes=routes,
+        )
+    executable = (
+        executor.executable_routes(chat_req.model)
+        if callable(getattr(executor, "executable_routes", None))
+        else {}
+    )
+    for route in routes:
+        modality = str(route.metadata.get("modality", ""))
+        if route.route not in set(executable.get(modality, ())):
+            return _resource_execution_error_response(
+                ResourceExecutionError(
+                    "selected provider executor cannot perform the planned resource route"
+                ),
+                adapter_name=adapter_name,
+                routes=routes,
+            )
+
+    _enforce_executor_route_constraints(
+        executor=executor, model=chat_req.model, routes=routes, uploads=uploads
+    )
+
+    chat_executor = executor  # runtime-checked ProviderChatExecutor protocol shape
+    session = ResourceExecutionSession(
+        provider=adapter_name,
+        model=chat_req.model,
+        executor=executor,
+        routes=routes,
+    )
+    upstream: httpx.Response | None = None
+    stream_handed_off = False
+    try:
+        await session.prepare(uploads)
+        upstream = await chat_executor.open_chat(
+            chat=chat_req,
+            handles=session.private_handles,
+        )
+        if (
+            upstream.status_code < 200  # ruff: ignore[magic-value-comparison]
+            or upstream.status_code >= 300  # ruff: ignore[magic-value-comparison]
+        ):
+            status = upstream.status_code
+            await upstream.aclose()
+            upstream = None
+            logger.warning(
+                "AI proxy [UPSTREAM_STATUS]: resource provider rejected request status=%d adapter=%s",
+                status,
+                adapter_name,
+            )
+            code = _upstream_public_error_code(status)
+            return JSONResponse(
+                status_code=status,
+                content={
+                    "code": code,
+                    "error": {
+                        "type": "upstream_error",
+                        "code": code,
+                        "message": (
+                            "The upstream AI provider rejected the resource request."
+                        ),
+                    },
+                },
+                headers={"Cache-Control": "no-store"},
+            )
+
+        if (
+            bool(chat_req.stream)
+            and "text/event-stream"
+            in (upstream.headers.get("content-type") or "").lower()
+        ):
+
+            async def _stream() -> AsyncGenerator[bytes, None]:
+                bridge = chat_executor.chat_sse(
+                    upstream, maximum=MAX_UPSTREAM_RESPONSE_BYTES
+                )
+                try:
+                    async for frame in bridge:
+                        yield frame
+                finally:
+                    # Explicitly close the provider bridge first.  An ``async for``
+                    # interrupted by downstream cancellation does not otherwise
+                    # guarantee the inner async generator's ``finally`` finishes
+                    # before provider-file cleanup begins.
+                    aclose = getattr(bridge, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
+                    try:
+                        if not upstream.is_closed:
+                            await upstream.aclose()
+                    finally:
+                        await session.close_shielded()
+
+            stream_handed_off = True
+            return StreamingResponse(
+                _stream(),
+                status_code=200,
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-store"},
+            )
+
+        payload = await chat_executor.buffered_chat_response(
+            upstream, maximum=MAX_UPSTREAM_RESPONSE_BYTES
+        )
+        return JSONResponse(
+            status_code=200,
+            content=payload,
+            headers={"Cache-Control": "no-store"},
+        )
+    except ResourceExecutionError as exc:
+        return _resource_execution_error_response(
+            exc, adapter_name=adapter_name, routes=routes
+        )
+    finally:
+        # A StreamingResponse owns provider cleanup until its body terminates or
+        # downstream cancellation closes the generator.  All other paths release
+        # provider files before returning to the browser.
+        if not stream_handed_off:
+            if upstream is not None and not upstream.is_closed:
+                await upstream.aclose()
+            await session.close_shielded()
+
+
+def _provider_artifact_error_response(  # ruff: ignore[too-many-branches]
+    exc: ProviderArtifactError,
+) -> JSONResponse:
+    """Map generated-artifact failures to bounded public semantics."""
+    code = exc.code
+    if code == "PROVIDER_ARTIFACT_REQUEST_TOO_LARGE":
+        status, public = (
+            413,
+            "The binary artifact generation request exceeds the configured limit.",
+        )
+    elif code == "PROVIDER_ARTIFACT_GENERATOR_UNAVAILABLE":
+        status, public = (
+            404,
+            "The requested binary artifact generator is not available on this proxy.",
+        )
+    elif code == "PROVIDER_ARTIFACT_DUPLICATE":
+        status, public = (
+            409,
+            "An equivalent binary artifact generation is already active or was generated recently; use explicit regeneration to request another candidate.",
+        )
+    elif code == "PROVIDER_ARTIFACT_REGENERATION_INVALID":
+        status, public = (
+            409,
+            "The requested regeneration lifecycle is unavailable, expired, or incompatible with this generator.",
+        )
+    elif code in {"PROVIDER_ARTIFACT_CANCELLED", "PROVIDER_ARTIFACT_CANCEL_INVALID"}:
+        status, public = (
+            409,
+            "The binary artifact generation was cancelled or its cancellation capability is no longer valid.",
+        )
+    elif code == "PROVIDER_ARTIFACT_PROVENANCE_INVALID":
+        status, public = (
+            409,
+            "The provider artifact lifecycle is expired or does not match the replacement bytes.",
+        )
+    elif code == "PROVIDER_ARTIFACT_LIFECYCLE_BUSY":
+        status, public = (
+            503,
+            "The ephemeral artifact lifecycle registry is temporarily at capacity; retry later.",
+        )
+    elif code in {
+        "PROVIDER_ARTIFACT_LIFECYCLE_UNAVAILABLE",
+        "PROVIDER_ARTIFACT_REDIS_UNAVAILABLE",
+        "PROVIDER_ARTIFACT_REDIS_OPERATION_FAILED",
+        "PROVIDER_ARTIFACT_REDIS_NOT_INITIALIZED",
+    }:
+        status, public = (
+            503,
+            "The provider artifact lifecycle authority is temporarily unavailable.",
+        )
+    elif code in {
+        "PROVIDER_ARTIFACT_KIND_UNSUPPORTED",
+        "PROVIDER_ARTIFACT_MIME_UNSUPPORTED",
+        "PROVIDER_ARTIFACT_CAPABILITY_MISMATCH",
+        "PROVIDER_ARTIFACT_REQUEST_INVALID",
+    }:
+        status, public = (
+            422,
+            "The binary artifact generation request is outside the advertised generator contract.",
+        )
+    elif code in {
+        "PROVIDER_ARTIFACT_OUTPUT_TOO_LARGE",
+        "PROVIDER_ARTIFACT_UPSTREAM_TOO_LARGE",
+    }:
+        status, public = (
+            502,
+            "The generated artifact exceeded the proxy output safety limit.",
+        )
+    elif code in {
+        "PROVIDER_ARTIFACT_OUTPUT_INVALID",
+        "PROVIDER_ARTIFACT_OUTPUT_TYPE_MISMATCH",
+        "PROVIDER_ARTIFACT_RECEIPT_INVALID",
+    }:
+        status, public = (
+            502,
+            "The generated artifact failed the proxy verification boundary.",
+        )
+    elif code == "PROVIDER_ARTIFACT_UPSTREAM_REJECTED":
+        status, public = 502, "The configured artifact generator rejected the request."
+    elif code == "PROVIDER_ARTIFACT_UPSTREAM_UNAVAILABLE":
+        status, public = (
+            502,
+            "The configured artifact generator is temporarily unavailable.",
+        )
+    else:
+        status, public = 400, "The binary artifact generation request is invalid."
+    logger.warning("AI proxy [%s]: provider artifact output rejected.", code)
+    return JSONResponse(
+        status_code=status,
+        content={
+            "code": code,
+            "error": {
+                "type": "provider_artifact_output_error",
+                "code": code,
+                "message": public,
+            },
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/v1/artifacts/provider-output")
+async def provider_artifact_output(request: Request) -> Response:
+    """Generate one bounded ephemeral binary candidate without ZIP authority."""
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _provider_artifact_rl,
+        _provider_artifact_rl_lock,
+        client_ip,
+        limit=PROVIDER_ARTIFACT_RATE_LIMIT_PER_HOUR,
+        scope="provider-artifact-output",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps(
+                {"event": "provider_artifact.ratelimit", "ip": _mask_ip(client_ip)}
+            )
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for provider artifact generation.",
+            headers={"Retry-After": "3600"},
+        )
+    if (
+        _PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR
+        or not _PROVIDER_ARTIFACT_LIFECYCLE_READY
+        or (
+            PROVIDER_ARTIFACT_LIFECYCLE_REQUIRE_SHARED
+            and not bool(_PROVIDER_ARTIFACT_LIFECYCLE.manifest().get("shared"))
+        )
+    ):
+        return _provider_artifact_error_response(
+            ProviderArtifactError("PROVIDER_ARTIFACT_LIFECYCLE_UNAVAILABLE")
+        )
+    artifact = None
+    lifecycle_id = ""
+    generation_task: asyncio.Task | None = None
+    try:
+        body = await _read_limited_body(
+            request, PROVIDER_ARTIFACT_MAX_REQUEST_BYTES, "Provider artifact request"
+        )
+        parsed = parse_provider_artifact_request(body)
+        spec = _PROVIDER_ARTIFACT_OUTPUT_REGISTRY.spec(parsed.generator_id)
+        if spec is None:
+            raise ProviderArtifactError("PROVIDER_ARTIFACT_GENERATOR_UNAVAILABLE")
+        lifecycle_id = await _PROVIDER_ARTIFACT_LIFECYCLE.begin(
+            parsed, provider=spec.provider, model=spec.model
+        )
+        generation_task = asyncio.create_task(
+            _PROVIDER_ARTIFACT_OUTPUT_REGISTRY.generate(parsed)
+        )
+        await _PROVIDER_ARTIFACT_LIFECYCLE.attach_task(lifecycle_id, generation_task)
+        try:
+            artifact = await generation_task
+        except asyncio.CancelledError as exc:
+            await _PROVIDER_ARTIFACT_LIFECYCLE.fail(lifecycle_id, cancelled=True)
+            raise ProviderArtifactError("PROVIDER_ARTIFACT_CANCELLED") from exc
+        artifact.file.seek(0, os.SEEK_END)
+        output_size = artifact.file.tell()
+        artifact.file.seek(0)
+        if output_size != artifact.receipt.output_size:
+            raise ProviderArtifactError("PROVIDER_ARTIFACT_OUTPUT_INVALID")
+        artifact.receipt = await _PROVIDER_ARTIFACT_LIFECYCLE.complete(
+            lifecycle_id, artifact.receipt
+        )
+        receipt_header = encode_provider_artifact_receipt_header(artifact.receipt)
+    except ProviderArtifactError as exc:
+        if lifecycle_id:
+            await _PROVIDER_ARTIFACT_LIFECYCLE.fail(
+                lifecycle_id, cancelled=exc.code == "PROVIDER_ARTIFACT_CANCELLED"
+            )
+        if generation_task is not None and not generation_task.done():
+            generation_task.cancel()
+        if artifact is not None:
+            artifact.close()
+        return _provider_artifact_error_response(exc)
+
+    assert artifact is not None  # ruff: ignore[assert]
+    delivered = False
+
+    async def _stream_generated() -> AsyncGenerator[bytes, None]:
+        nonlocal delivered
+        try:
+            while True:
+                chunk = await asyncio.to_thread(artifact.file.read, 1024 * 1024)
+                if not chunk:
+                    delivered = True
+                    break
+                yield chunk
+        finally:
+            artifact.close()
+            if delivered and lifecycle_id:
+                await _PROVIDER_ARTIFACT_LIFECYCLE.mark_delivered(lifecycle_id)
+
+    return StreamingResponse(
+        _stream_generated(),
+        status_code=200,
+        media_type=artifact.receipt.mime_type,
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+            "Content-Length": str(artifact.receipt.output_size),
+            "X-Content-Type-Options": "nosniff",
+            "X-AI-Artifact-Contract": PROVIDER_ARTIFACT_RECEIPT_CONTRACT,
+            "X-AI-Artifact-Receipt": receipt_header,
+            "X-AI-Artifact-SHA256": artifact.receipt.output_sha256,
+        },
+    )
+
+
+@app.post("/v1/artifacts/provider-output/cancel")
+async def provider_artifact_output_cancel(request: Request) -> Response:
+    """Cancel one in-flight generation using an ephemeral browser-held capability."""
+    if (
+        _PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR
+        or not _PROVIDER_ARTIFACT_LIFECYCLE_READY
+    ):
+        return _provider_artifact_error_response(
+            ProviderArtifactError("PROVIDER_ARTIFACT_LIFECYCLE_UNAVAILABLE")
+        )
+    try:
+        body = await _read_limited_body(request, 2048, "Provider artifact cancellation")
+        try:
+            doc = json.loads(body)
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ProviderArtifactError("PROVIDER_ARTIFACT_CANCEL_INVALID") from exc
+        if (
+            not isinstance(doc, dict)
+            or set(doc) != {"contract", "cancel_token"}
+            or doc.get("contract") != PROVIDER_ARTIFACT_CANCEL_CONTRACT
+            or not isinstance(doc.get("cancel_token"), str)
+        ):
+            raise ProviderArtifactError("PROVIDER_ARTIFACT_CANCEL_INVALID")
+        status = await _PROVIDER_ARTIFACT_LIFECYCLE.cancel(
+            doc["cancel_token"].strip().lower()
+        )
+        return JSONResponse(
+            status_code=200, content=dict(status), headers={"Cache-Control": "no-store"}
+        )
+    except ProviderArtifactError as exc:
+        return _provider_artifact_error_response(exc)
+
+
+def _zip_artifact_error_response(exc: ZipArtifactError) -> JSONResponse:
+    """Map ZIP artifact failures to bounded public semantics without file data."""
+    code = exc.code
+    if code in {"ZIP_EDIT_TOO_LARGE", "ZIP_EDIT_MANIFEST_TOO_LARGE"}:
+        status = 413
+        public = "ZIP edit request exceeds the configured artifact limits."
+    elif code == "ZIP_EDIT_NOT_AUTHORIZED":
+        status = 403
+        public = "A proposed replacement path was not explicitly authorized."
+    elif code == "ZIP_EDIT_SOURCE_MISMATCH":
+        status = 409
+        public = "The source archive generation no longer matches the edit manifest."
+    elif code == "ZIP_EDIT_REPLACEMENT_MISMATCH":
+        status = 422
+        public = (
+            "One or more replacement byte generations do not match the edit manifest."
+        )
+    elif code == "ZIP_EDIT_WORKSPACE_REJECTED":
+        status = 400
+        public = "The source archive or requested rewrite is outside the safe ZIP workspace contract."
+    elif code == "ZIP_EDIT_VERIFICATION_FAILED":
+        status = 500
+        public = "The modified ZIP failed the server verification boundary."
+    elif code == "ZIP_EDIT_MANIFEST_INVALID":
+        status = 422
+        public = "The ZIP edit authorization manifest is invalid."
+    else:
+        status = 400
+        public = "The ZIP edit artifact request is invalid."
+    logger.warning("AI proxy [%s]: ZIP edit artifact rejected locally.", code)
+    return JSONResponse(
+        status_code=status,
+        content={
+            "code": code,
+            "error": {
+                "type": "zip_edit_artifact_error",
+                "code": code,
+                "message": public,
+            },
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.post("/v1/artifacts/zip-edit")
+async def zip_edit_artifact(  # ruff: ignore[too-many-branches]
+    request: Request,
+) -> Response:
+    """Apply explicitly authorized existing-file replacements to a complete ZIP.
+
+    Provider/model output is never an archive authority. The client supplies a
+    strict manifest separating authorization paths from proposed replacements;
+    the proxy independently binds source/replacement byte generations and then
+    delegates the complete-tree rewrite to the server-owned ZIP workspace.
+    """
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _zip_edit_rl,
+        _zip_edit_rl_lock,
+        client_ip,
+        limit=ZIP_EDIT_RATE_LIMIT_PER_HOUR,
+        scope="zip-edit",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps({"event": "zip_edit.ratelimit", "ip": _mask_ip(client_ip)})
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for ZIP edit artifact requests.",
+            headers={"Retry-After": "3600"},
+        )
+
+    parsed = None
+    artifact = None
+    provider_artifact_ids: tuple[str, ...] = ()
+    provider_reservation_id = ""
+    try:
+        parsed = await parse_zip_edit_request(request)
+        correlations = tuple(
+            (replacement.provider_artifact_id, replacement.sha256, replacement.size)
+            for replacement in parsed.manifest.replacements
+            if replacement.provider_artifact_id
+        )
+        if correlations and (
+            _PROVIDER_ARTIFACT_LIFECYCLE_CONFIG_ERROR
+            or not _PROVIDER_ARTIFACT_LIFECYCLE_READY
+            or (
+                PROVIDER_ARTIFACT_LIFECYCLE_REQUIRE_SHARED
+                and not bool(_PROVIDER_ARTIFACT_LIFECYCLE.manifest().get("shared"))
+            )
+        ):
+            raise ProviderArtifactError("PROVIDER_ARTIFACT_LIFECYCLE_UNAVAILABLE")
+        (
+            provider_reservation_id,
+            provider_artifact_ids,
+        ) = await _PROVIDER_ARTIFACT_LIFECYCLE.reserve_zip_correlations(correlations)
+        # ZIP validation, CRC verification and compression are blocking work.
+        # Keep them off the async request loop while preserving server-owned
+        # spooled file generations.
+        artifact = await asyncio.to_thread(build_zip_edit_artifact, parsed)
+        if provider_artifact_ids:
+            artifact.receipt = replace(
+                artifact.receipt,
+                provider_artifact_ids=provider_artifact_ids,
+            )
+    except ProviderArtifactError as exc:
+        if provider_reservation_id:
+            await _PROVIDER_ARTIFACT_LIFECYCLE.release_zip_reservation(
+                provider_artifact_ids, provider_reservation_id
+            )
+        return _provider_artifact_error_response(exc)
+    except ZipArtifactError as exc:
+        if provider_reservation_id:
+            await _PROVIDER_ARTIFACT_LIFECYCLE.release_zip_reservation(
+                provider_artifact_ids, provider_reservation_id
+            )
+        return _zip_artifact_error_response(exc)
+    except Exception:
+        if provider_reservation_id:
+            await _PROVIDER_ARTIFACT_LIFECYCLE.release_zip_reservation(
+                provider_artifact_ids, provider_reservation_id
+            )
+        raise
+    finally:
+        if parsed is not None:
+            await parsed.close()
+
+    assert artifact is not None  # ruff: ignore[assert]
+    try:
+        artifact.file.seek(0, os.SEEK_END)
+        output_size = artifact.file.tell()
+        artifact.file.seek(0)
+        receipt_header = encode_zip_edit_receipt_header(artifact.receipt)
+    except Exception:
+        artifact.close()
+        if provider_reservation_id:
+            await _PROVIDER_ARTIFACT_LIFECYCLE.release_zip_reservation(
+                provider_artifact_ids, provider_reservation_id
+            )
+        raise
+
+    zip_delivered = False
+
+    async def _stream_zip() -> AsyncGenerator[bytes, None]:
+        nonlocal zip_delivered
+        try:
+            while True:
+                chunk = await asyncio.to_thread(artifact.file.read, 1024 * 1024)
+                if not chunk:
+                    zip_delivered = True
+                    break
+                yield chunk
+        finally:
+            artifact.close()
+            # A candidate becomes terminal only after the correlated ZIP body
+            # actually reaches the end of the server stream.  Interrupted
+            # downloads therefore do not consume provenance authority forever.
+            if provider_reservation_id:
+                if zip_delivered:
+                    await _PROVIDER_ARTIFACT_LIFECYCLE.mark_applied(
+                        provider_artifact_ids, provider_reservation_id
+                    )
+                else:
+                    await _PROVIDER_ARTIFACT_LIFECYCLE.release_zip_reservation(
+                        provider_artifact_ids, provider_reservation_id
+                    )
+
+    return StreamingResponse(
+        _stream_zip(),
+        status_code=200,
+        media_type="application/zip",
+        headers={
+            "Cache-Control": "no-store",
+            "Content-Disposition": f'attachment; filename="{artifact.filename}"',
+            "Content-Length": str(output_size),
+            "X-Content-Type-Options": "nosniff",
+            "X-AI-Artifact-Contract": ZIP_EDIT_RECEIPT_CONTRACT,
+            "X-AI-Artifact-Receipt": receipt_header,
+            "X-AI-Artifact-SHA256": artifact.receipt.output_sha256,
+        },
+    )
+
+
+@app.get("/v1/resource-capabilities")
+async def resource_capabilities(request: Request) -> Response:
+    """Return bounded, credential-free resource capability data for one model.
+
+    The endpoint avoids making ``/health`` scale linearly with arbitrarily large
+    ALLOWED_MODELS deployments.  It exposes only route names and adapter identity;
+    no provider token, provider file id, upstream URL, or credential state is
+    included.
+    """
+    model = str(request.query_params.get("model", "")).strip()
+    if not _resource_model_allowed(model):
+        return JSONResponse(
+            status_code=404,
+            content={"code": "RESOURCE_MODEL_NOT_AVAILABLE"},
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(
+        content={"model": model, "capability": _resource_capability_doc(model)},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @app.post("/v1/chat/completions")
-async def chat_completions(body: bytes = Depends(_validated_body)) -> Response:
+async def chat_completions(  # ruff: ignore[undocumented-param]
+    request: Request,
+) -> Response:
     """
-    Primary proxy endpoint — OpenAI-compatible ``/v1/chat/completions``.
+    Primary proxy endpoint using the ``scikitplot-chat-v1`` client contract.
 
     Parameters
     ----------
     body : bytes
-        Raw request body, pre-validated by :func:`_validated_body`.
+        ``scikitplot-chat-v1`` request body, pre-validated for size by :func:`_validated_body`.
 
     Returns
     -------
@@ -1112,18 +4825,67 @@ async def chat_completions(body: bytes = Depends(_validated_body)) -> Response:
     --------
     chat_completions_alias : ``POST /`` path-agnostic alias.
     """
-    return await _forward(body)
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _chat_rl,
+        _chat_rl_lock,
+        client_ip,
+        limit=CHAT_RATE_LIMIT_PER_HOUR,
+        scope="chat",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps({"event": "chat.ratelimit", "ip": _mask_ip(client_ip)})
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for chat requests.",
+            headers={"Retry-After": "3600"},
+        )
+    uploads: tuple[ResourceUpload, ...] = ()
+    try:
+        body, chat_req, uploads, wire_stats = await _chat_request_transport(request)
+        summaries = resource_summary(row.verified for row in uploads)
+        stubbed = await _stub_intercept(
+            body, request.headers, resources=summaries, wire_stats=wire_stats
+        )
+        if stubbed is not None:
+            return stubbed
+        adapter_name = _resource_adapter_name_for_model(chat_req.model)
+        if (
+            uploads
+            or _RESOURCE_EXECUTOR_REGISTRY.execution_state(adapter_name) == "enabled"
+        ):
+            return await _execute_resource_chat(chat_req=chat_req, uploads=uploads)
+        upstream_body = encode_upstream_payload(
+            chat_req,
+            reasoning_enabled=REASONING_ENABLED,
+            effort_param=REASONING_EFFORT_PARAM if REASONING_ENABLED else "",
+            thinking_param=REASONING_THINKING_PARAM if REASONING_ENABLED else "",
+            thinking_mode=REASONING_THINKING_MODE,
+            budget_min=REASONING_BUDGET_MIN,
+            budget_max=REASONING_BUDGET_MAX,
+        )
+        return await _forward(upstream_body, structured_body=body)
+    except ResourceTransportError as exc:
+        return _resource_transport_error_response(exc)
+    except ChatContractError as exc:
+        return _chat_contract_error_response(exc)
+    finally:
+        await _close_resource_uploads(uploads)
 
 
 @app.post("/")
-async def chat_completions_alias(body: bytes = Depends(_validated_body)) -> Response:
+async def chat_completions_alias(  # ruff: ignore[undocumented-param]
+    request: Request,
+) -> Response:
     """
     Path-agnostic alias: ``POST /`` → identical to ``POST /v1/chat/completions``.
 
     Parameters
     ----------
     body : bytes
-        Raw request body, pre-validated by :func:`_validated_body`.
+        ``scikitplot-chat-v1`` request body, pre-validated for size by :func:`_validated_body`.
 
     Returns
     -------
@@ -1136,625 +4898,2729 @@ async def chat_completions_alias(body: bytes = Depends(_validated_body)) -> Resp
     This alias handles ``conf.py`` configurations that set ``endpoint``
     to the bare Space URL without the path suffix.
     """
-    return await _forward(body)
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _chat_rl,
+        _chat_rl_lock,
+        client_ip,
+        limit=CHAT_RATE_LIMIT_PER_HOUR,
+        scope="chat",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps({"event": "chat.ratelimit", "ip": _mask_ip(client_ip)})
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for chat requests.",
+            headers={"Retry-After": "3600"},
+        )
+    uploads: tuple[ResourceUpload, ...] = ()
+    try:
+        body, chat_req, uploads, wire_stats = await _chat_request_transport(request)
+        summaries = resource_summary(row.verified for row in uploads)
+        stubbed = await _stub_intercept(
+            body, request.headers, resources=summaries, wire_stats=wire_stats
+        )
+        if stubbed is not None:
+            return stubbed
+        adapter_name = _resource_adapter_name_for_model(chat_req.model)
+        if (
+            uploads
+            or _RESOURCE_EXECUTOR_REGISTRY.execution_state(adapter_name) == "enabled"
+        ):
+            return await _execute_resource_chat(chat_req=chat_req, uploads=uploads)
+        upstream_body = encode_upstream_payload(
+            chat_req,
+            reasoning_enabled=REASONING_ENABLED,
+            effort_param=REASONING_EFFORT_PARAM if REASONING_ENABLED else "",
+            thinking_param=REASONING_THINKING_PARAM if REASONING_ENABLED else "",
+            thinking_mode=REASONING_THINKING_MODE,
+            budget_min=REASONING_BUDGET_MIN,
+            budget_max=REASONING_BUDGET_MAX,
+        )
+        return await _forward(upstream_body, structured_body=body)
+    except ResourceTransportError as exc:
+        return _resource_transport_error_response(exc)
+    except ChatContractError as exc:
+        return _chat_contract_error_response(exc)
+    finally:
+        await _close_resource_uploads(uploads)
+
+
+def _contribution_ledger_http_error(  # ruff: ignore[too-many-return-statements]
+    exc: ContributionLedgerError,
+) -> HTTPException:
+    """Map private ledger state codes to bounded public lifecycle semantics."""
+    code = exc.code
+    if code == "NOT_FOUND":
+        return HTTPException(status_code=404, detail="Contribution receipt not found.")
+    if code == "EXPIRED":
+        return HTTPException(status_code=410, detail="Pending contribution expired.")
+    if code in {"PROMOTION_IN_PROGRESS", "WITHDRAWAL_IN_PROGRESS", "BUSY"}:
+        return HTTPException(
+            status_code=409,
+            detail="Contribution lifecycle operation already in progress.",
+        )
+    if code in {"RECONCILIATION_REQUIRED", "STALE_CLAIM"}:
+        return HTTPException(
+            status_code=409,
+            detail="Contribution lifecycle outcome requires reconciliation.",
+        )
+    if code in {"PENDING_CAPACITY", "PENDING_BYTE_CAPACITY", "RECEIPT_CAPACITY"}:
+        return HTTPException(
+            status_code=507, detail="Contribution lifecycle capacity reached."
+        )
+    if code in {"NOT_PENDING", "NOT_ELIGIBLE", "PROMOTION_STATE", "WITHDRAWAL_STATE"}:
+        return HTTPException(
+            status_code=409,
+            detail="Contribution is not in the required lifecycle state.",
+        )
+    return HTTPException(
+        status_code=503, detail="Contribution lifecycle control plane unavailable."
+    )
+
+
+def _storage_receipt_metadata(receipt: Any) -> dict[str, Any]:
+    """Return only non-secret provider control metadata for the receipt ledger."""
+    return {
+        "recordId": str(getattr(receipt, "record_id", "") or ""),
+        "primary": getattr(receipt, "primary", None),
+        "mirrors": dict(getattr(receipt, "mirrors", {}) or {}),
+        "paths": dict(getattr(receipt, "paths", {}) or {}),
+    }
+
+
+def _contribution_review_reference(
+    entry: dict[str, Any], review: Any | None = None
+) -> dict[str, Any]:
+    """Return non-secret review locator metadata safe for participant support.
+
+    This intentionally excludes provider URLs, repository tokens, management
+    capabilities, and raw contribution content.  The reference is useful when
+    a participant no longer has a working management capability and needs a
+    maintainer to locate the native PR/MR or its stable review file.
+    """
+    storage = entry.get("storage") if isinstance(entry.get("storage"), dict) else {}
+    raw_review = (
+        storage.get("review") if isinstance(storage.get("review"), dict) else {}
+    )
+    paths = storage.get("paths") if isinstance(storage.get("paths"), dict) else {}
+
+    provider = str(getattr(review, "provider", "") or raw_review.get("provider") or "")[
+        :32
+    ]
+    review_id = str(
+        getattr(review, "review_id", "") or raw_review.get("reviewId") or ""
+    )[:32]
+    path = str(getattr(review, "path", "") or "")
+    if not path:
+        target_id = str(raw_review.get("targetId") or "")
+        if target_id and target_id in paths:
+            path = str(paths.get(target_id) or "")
+        elif len(paths) == 1:
+            path = str(next(iter(paths.values())) or "")
+    # Storage paths are validated before entering the ledger.  Re-bound here so
+    # malformed legacy metadata cannot turn a support reference into log/markup
+    # injection material.
+    path = path.replace("\\", "/").replace("\r", "").replace("\n", "")[:512]
+    if not path or path.startswith("/") or ".." in path.split("/"):
+        path = ""
+
+    out: dict[str, Any] = {}
+    if provider:
+        out["reviewProvider"] = provider
+    if review_id and review_id.isdigit():
+        out["reviewId"] = review_id
+    if path:
+        out["reviewPath"] = path
+    return out
+
+
+def _contribution_status_payload(entry: dict[str, Any]) -> dict[str, Any]:
+    state = str(entry.get("state") or "unknown")
+    return {
+        "status": state,
+        "trainingEligible": state == "eligible",
+        "trainingWithdrawn": state == "withdrawn",
+        "lifecycleUncertain": state in {"promotion_uncertain", "withdrawal_uncertain"},
+        "reconciliationRequired": (
+            state in {"promotion_uncertain", "withdrawal_uncertain"}
+        ),
+        "pendingPhysicalDeleteAvailable": state == "quarantined",
+        # Even a mutable-store deletion is not represented as forensic/global
+        # physical erasure: database pages/WAL, filesystem snapshots, backups,
+        # or provider history may exist.  What we can prove is removal of the
+        # active pending payload from this lifecycle ledger.
+        "contentRemovedFromActiveLedger": (
+            state in {"deleted", "expired", "eligible", "withdrawn"}
+            or (
+                state in {"withdrawing", "withdrawal_uncertain"}
+                and not bool(entry.get("records"))
+            )
+        ),
+        "physicalErasureGuaranteed": False,
+        "physicalErasureScope": "not-guaranteed",
+        "reviewRevision": max(
+            1, int((entry.get("operation") or {}).get("reviewRevision") or 1)
+        ),
+        "expiresAt": (
+            int(float(entry.get("expiresAt") or 0) * 1000)
+            if entry.get("expiresAt")
+            else None
+        ),
+        "promotedAt": (
+            int(float(entry.get("promotedAt") or 0) * 1000)
+            if entry.get("promotedAt")
+            else None
+        ),
+        "withdrawnAt": (
+            int(float(entry.get("withdrawnAt") or 0) * 1000)
+            if entry.get("withdrawnAt")
+            else None
+        ),
+    }
+
+
+async def _persist_contribution_withdrawal(
+    dedup_keys: list[str],
+    *,
+    commit_message: str,
+    server_ts_ms: int | None = None,
+    path_timestamp: float | None = None,
+):
+    """Persist privacy-minimal withdrawal tombstones to authoritative storage.
+
+    A caller may supply receipt-stable time values so crash/retry replays produce
+    byte-identical tombstones at the same provider path instead of accumulating
+    multiple logical withdrawal files.
+    """
+    server_ts_ms = int(
+        server_ts_ms if server_ts_ms is not None else _time.time() * 1000
+    )
+    rows = [
+        normalize_contribution_withdrawal_record(key, server_ts_ms=server_ts_ms)
+        for key in dedup_keys
+        if isinstance(key, str) and key
+    ]
+    if not rows:
+        raise StorageWriteError("WITHDRAWAL_KEYS")
+    content = ("\n".join(json.dumps(row, ensure_ascii=False) for row in rows)).encode(
+        "utf-8"
+    )
+    return await _persist_storage_record(
+        kind="contributions",
+        content=content,
+        commit_message=commit_message,
+        path_timestamp=path_timestamp,
+    )
+
+
+def _provider_review_enabled() -> bool:
+    return CONTRIBUTION_REVIEW_MODE == "provider-pr"
+
+
+def _provider_review_content(entry: dict[str, Any]) -> bytes:
+    """Render the exact future-main bytes for a quarantined contribution."""
+    reviewed: list[dict[str, Any]] = []
+    for row in entry.get("records", []):
+        if not isinstance(row, dict):
+            continue
+        promoted = dict(row)
+        promoted["trainingStatus"] = "eligible"
+        reviewed.append(promoted)
+    if not reviewed:
+        raise StorageWriteError("EMPTY_REVIEW")
+    return ("\n".join(json.dumps(r, ensure_ascii=False) for r in reviewed)).encode(
+        "utf-8"
+    )
+
+
+async def _ensure_provider_review(entry: dict[str, Any]):
+    """Resolve one native review, opening it only for legacy/unbound receipts."""
+    if not _provider_review_enabled():
+        return None
+    if _STORAGE.primary is None:
+        raise StorageWriteError("NO_PRIMARY_TARGET")
+    receipt_id = str(entry.get("receiptId") or "")
+    storage_hint = (
+        entry.get("storage") if isinstance(entry.get("storage"), dict) else {}
+    )
+    if isinstance(storage_hint.get("review"), dict):
+        review = await _STORAGE.get_contribution_review(
+            receipt_id, review_hint=storage_hint
+        )
+        if review is None:
+            raise StorageWriteError("REVIEW_NOT_FOUND")
+        return review
+    review = await _STORAGE.open_contribution_review(
+        receipt_id=receipt_id,
+        content=_provider_review_content(entry),
+        commit_message=(
+            "Automated dataset contribution review. "
+            "Merge to make this record training-eligible; close/decline to reject it."
+        ),
+        path_timestamp=float(entry.get("receivedAt") or _time.time()),
+    )
+    if str(entry.get("state") or "") == "quarantined":
+        try:
+            bound = await _CONTRIBUTION_LEDGER.set_pending_storage(
+                receipt_id, storage=review.storage_metadata()
+            )
+            entry["storage"] = bound.get("storage") or review.storage_metadata()
+        except ContributionLedgerError as exc:
+            raise StorageWriteError("REVIEW_BIND_LEDGER", transient=True) from exc
+    return review
+
+
+async def _sync_provider_review_merge(
+    entry: dict[str, Any],
+) -> tuple[dict[str, Any], Any | None]:
+    """Observe manual provider-UI merges and ratchet the local lifecycle forward."""
+    if not _provider_review_enabled() or str(entry.get("state") or "") != "quarantined":
+        return entry, None
+    review = await _ensure_provider_review(entry)
+    if review is None or review.status != "merged":
+        return entry, review
+    try:
+        claimed = await _CONTRIBUTION_LEDGER.begin_promotion(
+            str(entry.get("receiptId") or "")
+        )
+        claim = str(claimed.get("operationClaim") or "") or None
+        promoted = await _CONTRIBUTION_LEDGER.mark_promoted(
+            str(entry.get("receiptId") or ""),
+            storage=review.storage_metadata(),
+            claim_token=claim,
+        )
+        logger.info(
+            json.dumps(
+                {"event": "contribute.review_merged", "provider": review.provider}
+            )
+        )
+        return promoted, review
+    except ContributionLedgerError as exc:
+        # Another replica/request may have observed the same merge first. Re-read
+        # rather than interpreting an already-ratcheted state as a merge failure.
+        current = await _CONTRIBUTION_LEDGER.get(str(entry.get("receiptId") or ""))
+        if current is not None and str(current.get("state") or "") == "eligible":
+            return current, review
+        raise _contribution_ledger_http_error(exc) from exc
+
+
+def _validate_feedback_lineage_fields(  # ruff: ignore[too-many-branches]
+    container: dict[str, Any],
+    *,
+    label: str,
+) -> None:
+    """Validate the current schema-v5 feedback ancestry contract.
+
+    A lineage-bearing record is self-contained: current writers must provide
+    the stable root ``feedbackChainId``, immediate ``prevFeedbackId``, ordered
+    ``prevFeedbackIds`` ancestry vector, and matching ``editCount``. Retired
+    scalar-only/alias forms are rejected rather than silently upgraded.
+    """
+    if "sessionId" in container or "prevSessionId" in container:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label} uses retired feedback lineage aliases; use feedbackId/prevFeedbackId.",
+        )
+
+    feedback_id = container.get("feedbackId")
+    chain_id = container.get("feedbackChainId")
+    prev_id = container.get("prevFeedbackId")
+    prev_ids = container.get("prevFeedbackIds")
+    edit_count = container.get("editCount", 0)
+
+    for field, value in (
+        ("feedbackId", feedback_id),
+        ("feedbackChainId", chain_id),
+        ("prevFeedbackId", prev_id),
+    ):
+        if value is not None and (
+            not isinstance(value, str) or not value or _is_above_thr(value, 256)
+        ):
+            raise HTTPException(status_code=422, detail=f"{label}.{field} is invalid.")
+    if (
+        not isinstance(edit_count, int)
+        or isinstance(edit_count, bool)
+        or edit_count < 0
+        or edit_count > MAX_FEEDBACK_LINEAGE_IDS
+    ):
+        raise HTTPException(status_code=422, detail=f"{label}.editCount is invalid.")
+
+    # A record with no rating lineage at all is valid for contribution content
+    # whose Ratings & feedback option is disabled. Once feedbackId is present,
+    # the complete current lineage shape is mandatory.
+    if feedback_id is None:
+        if (
+            chain_id is not None
+            or prev_id is not None
+            or prev_ids not in (None, [])
+            or edit_count != 0
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label} has lineage metadata without feedbackId.",
+            )
+        return
+
+    if not isinstance(prev_ids, list) or len(prev_ids) > MAX_FEEDBACK_LINEAGE_IDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label}.prevFeedbackIds is required and must be a bounded list.",
+        )
+    if chain_id is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label}.feedbackChainId is required when feedbackId is present.",
+        )
+    if any(
+        not isinstance(item, str) or not item or _is_above_thr(item, 256)
+        for item in prev_ids
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label}.prevFeedbackIds contains an invalid identifier.",
+        )
+    if len(set(prev_ids)) != len(prev_ids):
+        raise HTTPException(
+            status_code=422,
+            detail=f"{label}.prevFeedbackIds contains a duplicate/cycle.",
+        )
+    if feedback_id in prev_ids:
+        raise HTTPException(
+            status_code=422, detail=f"{label}.feedbackId appears in its own ancestry."
+        )
+    if prev_ids:
+        if prev_id != prev_ids[-1]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label}.prevFeedbackId must match the newest ancestry entry.",
+            )
+        if chain_id != prev_ids[0]:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label}.feedbackChainId must match the oldest ancestry entry.",
+            )
+        if edit_count != len(prev_ids):
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label}.editCount must match the ancestry length.",
+            )
+    else:
+        if prev_id is not None or edit_count != 0:
+            raise HTTPException(
+                status_code=422, detail=f"{label} first-rating lineage is inconsistent."
+            )
+        if chain_id != feedback_id:
+            raise HTTPException(
+                status_code=422,
+                detail=f"{label}.feedbackChainId must equal feedbackId for the first rating.",
+            )
+
+
+def _contribution_model_attribution(raw: Any) -> dict[str, Any] | None:
+    """Return only the model identity needed by contribution review.
+
+    Transport endpoints, info links, descriptions, labels and default/custom UI
+    state are deliberately not contribution content.  This prevents a custom
+    model configuration from becoming an accidental metadata-exfiltration lane.
+    """
+    if not isinstance(raw, dict):
+        return None
+    provider = raw.get("provider")
+    model = raw.get("model")
+    if (
+        not isinstance(provider, str)  # lint
+        or not provider.strip()  # lint
+        or len(provider) > 128  # ruff: ignore[magic-value-comparison]
+    ):
+        return None
+    if (
+        not isinstance(model, str)  # lint
+        or not model.strip()  # lint
+        or len(model) > 512  # ruff: ignore[magic-value-comparison]
+    ):
+        return None
+    if any(
+        ord(ch) < 32  # ruff: ignore[magic-value-comparison]
+        or ord(ch) == 127  # ruff: ignore[magic-value-comparison]
+        for ch in provider + model
+    ):
+        return None
+    raw_id = raw.get("id")
+    model_id = raw_id[:256] if isinstance(raw_id, str) and raw_id else None
+    if model_id is not None and any(
+        ord(ch) < 32  # ruff: ignore[magic-value-comparison]
+        or ord(ch) == 127  # ruff: ignore[magic-value-comparison]
+        for ch in model_id
+    ):
+        model_id = None
+    return {
+        "id": model_id,
+        "provider": provider.strip(),
+        "model": model.strip(),
+    }
+
+
+def _canonicalize_contribution_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Minimize contribution metadata before digesting or normalizing it.
+
+    Current browser payloads already apply this boundary.  The server repeats it
+    so legacy or hostile clients cannot smuggle model transport configuration or
+    URL credentials/query/fragment data into provider review records.
+    """
+    clean = json.loads(json.dumps(payload))
+    page = clean.get("page", "")
+    if page is not None and not isinstance(page, str):
+        raise HTTPException(status_code=422, detail="Contribution page is invalid.")
+    clean["page"] = sanitize_share_page_url(page or "")
+    clean["model"] = _contribution_model_attribution(clean.get("model"))
+    records = clean.get("records")
+    if isinstance(records, list):
+        for rec in records:
+            if not isinstance(rec, dict) or rec.get("recordType") != "conversation":
+                continue
+            messages = rec.get("messages")
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, dict) or message.get("role") != "assistant":
+                    continue
+                message["model"] = _contribution_model_attribution(message.get("model"))
+    return clean
+
+
+def _strict_current_contribution_records(  # ruff: ignore[too-many-branches]
+    records: list[Any],
+) -> None:
+    """Reject schema-v4 reviewed content that normalization would truncate/drop."""
+    for index, rec in enumerate(records):
+        if not isinstance(rec, dict):
+            raise HTTPException(
+                status_code=422, detail=f"records[{index}] must be an object."
+            )
+        record_type = rec.get("recordType")
+        if record_type not in {"qa", "conversation"}:
+            raise HTTPException(
+                status_code=422,
+                detail=f"records[{index}].recordType must be qa or conversation.",
+            )
+        note = rec.get("message", "")
+        if note is not None and not isinstance(note, str):
+            raise HTTPException(
+                status_code=422, detail=f"records[{index}].message must be text."
+            )
+        if isinstance(note, str) and len(note) > MAX_CONTRIBUTION_NOTE_CHARS:
+            raise HTTPException(
+                status_code=422,
+                detail=f"records[{index}].message exceeds {MAX_CONTRIBUTION_NOTE_CHARS} characters.",
+            )
+        if record_type == "qa":
+            for field in ("query", "answer"):
+                value = rec.get(field, "")
+                if not isinstance(value, str):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"records[{index}].{field} must be text.",
+                    )
+                if len(value) > MAX_CONVERSATION_MESSAGE_CHARS:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"records[{index}].{field} exceeds {MAX_CONVERSATION_MESSAGE_CHARS} characters.",
+                    )
+            if not rec.get("query") and not rec.get("answer"):
+                raise HTTPException(
+                    status_code=422, detail=f"records[{index}] contains no Q&A content."
+                )
+            _validate_feedback_lineage_fields(rec, label=f"records[{index}]")
+            continue
+        messages = rec.get("messages")
+        if not isinstance(messages, list) or not messages:
+            raise HTTPException(
+                status_code=422,
+                detail=f"records[{index}].messages must be a non-empty list.",
+            )
+        if len(messages) > MAX_CONVERSATION_MESSAGES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"records[{index}].messages exceeds {MAX_CONVERSATION_MESSAGES} messages.",
+            )
+        for msg_index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                # Legacy/current normalization deliberately ignores non-object
+                # rows. They are not retained, so they cannot be silently
+                # truncated retained content.
+                continue
+            role = message.get("role")
+            if role not in {"user", "assistant"}:
+                # error/tool/system rows are a documented non-training family
+                # and remain filtered for Run-17 compatibility.
+                continue
+            content = message.get("content")
+            if not isinstance(content, str) or not content:
+                # Empty retained-role rows are filtered by the canonical
+                # normalizer; if all rows are filtered the existing
+                # "No valid contribution records" error remains authoritative.
+                continue
+            if len(content) > MAX_CONVERSATION_MESSAGE_CHARS:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"records[{index}].messages[{msg_index}].content exceeds {MAX_CONVERSATION_MESSAGE_CHARS} characters.",
+                )
+            feedback = message.get("feedback")
+            if feedback is not None:
+                if not isinstance(feedback, dict):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"records[{index}].messages[{msg_index}].feedback must be an object.",
+                    )
+                fb_note = feedback.get("note", "")
+                if not isinstance(fb_note, str):
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"records[{index}].messages[{msg_index}].feedback.note must be text.",
+                    )
+                if len(fb_note) > MAX_CONTRIBUTION_NOTE_CHARS:
+                    raise HTTPException(
+                        status_code=422,
+                        detail=f"records[{index}].messages[{msg_index}].feedback.note exceeds {MAX_CONTRIBUTION_NOTE_CHARS} characters.",
+                    )
+                _validate_feedback_lineage_fields(
+                    feedback,
+                    label=f"records[{index}].messages[{msg_index}].feedback",
+                )
+
+
+def _contribution_replay_response(
+    entry: dict[str, Any],
+    *,
+    receipt_id: str,
+    delete_token: str,
+    ledger_manifest: dict[str, Any],
+    replay: bool,
+    review: Any | None = None,
+    review_update: str = "",
+) -> JSONResponse:
+    body = {
+        "accepted": True,
+        "status": str(entry.get("state") or "quarantined"),
+        "rows": int(entry.get("rowCount") or len(entry.get("records") or [])),
+        "receiptId": receipt_id,
+        "expiresAt": int(float(entry.get("expiresAt") or 0) * 1000),
+        "consentVersion": RESERVED_CONSENT_VERSION,
+        "receiptDurability": ledger_manifest.get("durability"),
+        "idempotentReplay": bool(replay),
+        "reviewMode": CONTRIBUTION_REVIEW_MODE,
+        "trainingEligible": str(entry.get("state") or "") == "eligible",
+        "reviewRevision": max(
+            1, int((entry.get("operation") or {}).get("reviewRevision") or 1)
+        ),
+    }
+    if review_update:
+        body["reviewUpdate"] = review_update
+    if review is not None:
+        body["reviewProvider"] = str(getattr(review, "provider", "") or "")
+        body["reviewStatus"] = str(getattr(review, "status", "") or "")
+    elif _provider_review_enabled() and _STORAGE.primary is not None:
+        body["reviewProvider"] = _STORAGE.primary.provider
+    body.update(_contribution_review_reference(entry, review))
+    # Legacy/non-envelope API clients need the generated capability once.
+    # Current browser clients already hold it locally, so never echo it.
+    if delete_token:
+        body["deleteToken"] = delete_token
+    return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/v1/contribute")
-async def contribute(request: Request) -> JSONResponse:  # noqa: PLR0912
-    """Accept a training data contribution from the AI assistant browser widget.
+async def contribute(  # ruff: ignore[too-many-branches]
+    request: Request,
+) -> JSONResponse:
+    """Accept explicit content into quarantine with create-once recovery.
 
-    Parameters
-    ----------
-    request : fastapi.Request
-        HTTP request.  Body must be JSON conforming to the contribution schema.
-
-    Returns
-    -------
-    fastapi.responses.JSONResponse
-        ``{"contributed": true, "rows": N}`` on success.
-
-    Raises
-    ------
-    fastapi.HTTPException
-        422 when consent is absent/false, schemaVersion is unsupported, or
-        records exceed the maximum allowed count.
-        429 when the IP rate limit is exceeded.
-        503 when the HF Dataset push fails.
-
-    Notes
-    -----
-    Developer: ``consentFlag`` and ``consentVersion`` are checked before any
-    other validation.  A missing or mismatched consent version is a hard
-    rejection — the UI must always send the current version string so that
-    old cached pages cannot submit records that would silently bypass a
-    consent-text update.
-
-    Developer: The in-memory rate-limit store (``_contrib_rl``) is per-process
-    only.  HF Spaces may run multiple replicas.  The limit (5 per hour) is
-    intentionally loose; the primary defence is the GDPR consent gate.
-
-    Developer: ``huggingface_hub.HfApi.create_commit`` is called synchronously
-    inside an async handler.  This blocks the event loop for the duration of
-    the HTTP round-trip to HF (~200 ms on a warm connection).  For the current
-    traffic level this is acceptable; if throughput grows, wrap in
-    ``asyncio.get_event_loop().run_in_executor(None, ...)`` instead.
+    Schema-v4 intake validates the exact reviewed content before normalization;
+    it rejects, rather than silently truncates, records/messages that exceed the
+    canonical limits. Current browser clients also send a pre-request operation
+    envelope so a lost response can be retried without duplicating or orphaning
+    a receipt.
     """
-    # Body size guard
-    raw = await request.body()
-    if len(raw) > DEFAULT_MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Payload too large.")
+    ledger_manifest = _CONTRIBUTION_LEDGER.manifest()
+    if _CONTRIBUTION_LEDGER_CONFIG_ERROR:
+        raise HTTPException(
+            status_code=503, detail="Contribution lifecycle storage is misconfigured."
+        )
+    if not _CONTRIBUTION_LEDGER_READY:
+        raise HTTPException(
+            status_code=503, detail="Contribution lifecycle storage is unavailable."
+        )
+    if CONTRIBUTION_REQUIRE_DURABLE and not bool(ledger_manifest.get("durable")):
+        raise HTTPException(
+            status_code=503,
+            detail="Durable contribution lifecycle storage is required.",
+        )
+    if CONTRIBUTION_REQUIRE_SHARED and not (
+        bool(ledger_manifest.get("shared"))
+        and bool(ledger_manifest.get("authoritative"))
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail="Shared contribution lifecycle authority is required.",
+        )
+
+    raw = await _read_limited_body(request, CONTRIBUTION_MAX_BODY_BYTES, "Contribution")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
-
-    # Consent guard — GDPR Article 7: explicit consent required
-    if not payload.get("consentFlag"):
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422, detail="Contribution body must be a JSON object."
+        )
+    if payload.get("consentFlag") is not True:
+        raise HTTPException(
+            status_code=422, detail="Explicit contribution consent is required."
+        )
+    schema_version = payload.get("schemaVersion")
+    if schema_version not in {2, 3, 4}:
+        raise HTTPException(
+            status_code=422, detail="Unsupported contribution schemaVersion."
+        )
+    consent_version = payload.get("consentVersion")
+    consent_ok = (
+        consent_version == RESERVED_CONSENT_VERSION
+        if schema_version == 4  # ruff: ignore[magic-value-comparison]
+        else consent_version in (LEGACY_CONSENT_VERSIONS | {RESERVED_CONSENT_VERSION})
+    )
+    if not consent_ok:
         raise HTTPException(
             status_code=422,
-            detail="consentFlag must be true.  Contribution requires explicit user consent.",
+            detail="Consent text changed or is missing. Reload the page and review consent again.",
         )
-    # Consent-version guard (reserved for future enforcement).
-    # CONSENT_VERSION_ENABLED (imported from _dataset_schema) is False in the
-    # current state, so any consentVersion value — including null, sent by
-    # the current JS — is accepted.  This is the single flag that previously
-    # diverged from this module's own (now-removed) TRAINING_CONSENT_VERSION
-    # check, causing the 422 "consentVersion not current" error.
-    # When enforcement is activated: flip CONSENT_VERSION_ENABLED to True in
-    # _dataset_schema.py, set RESERVED_CONSENT_VERSION there to the live
-    # consent-banner version, and update ai-assistant.js to send
-    # `consentVersion: CONSENT_VERSION` again instead of `null` — then this
-    # block rejects mismatched/missing versions.
-    if CONSENT_VERSION_ENABLED:  # noqa: SIM102
-        if payload.get("consentVersion") != RESERVED_CONSENT_VERSION:
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"consentVersion {payload.get('consentVersion')!r} is not current. "
-                    f"Expected {RESERVED_CONSENT_VERSION!r}. Reload the page and try again."
-                ),
-            )
-
-    # Schema version guard.
-    # Accepts schemaVersion 1 (JS clients pre-v2 or not yet updated) and 2
-    # (JS clients sending the new canonical version).  The server always
-    # normalizes stored records to the current SCHEMA_VERSION (2) via
-    # normalize_contribution_record regardless of which version the client
-    # declares — so both values are safe to accept.
-    supported_versions: frozenset[int] = frozenset({1, 2})
-    if payload.get("schemaVersion") not in supported_versions:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"Unsupported schemaVersion {payload.get('schemaVersion')!r}. "
-                f"Supported: {sorted(supported_versions)}"
-            ),
-        )
-
-    records = payload.get("records", [])
-    if not isinstance(records, list):
-        raise HTTPException(status_code=422, detail="records must be a list.")
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        raise HTTPException(status_code=422, detail="records must be a non-empty list.")
     if len(records) > MAX_CONTRIBUTION_RECORDS:
         raise HTTPException(
             status_code=422,
             detail=f"Too many records. Maximum {MAX_CONTRIBUTION_RECORDS} per request.",
         )
+    if schema_version == 4:  # ruff: ignore[magic-value-comparison]
+        _strict_current_contribution_records(records)
 
-    # Per-IP rate limit: 5 contributions per hour
-    client_ip = _client_ip(request)
-    async with _contrib_rl_lock:
-        now = _time.time()
-        count, window_start = _contrib_rl.get(client_ip, (0, now))
-        if now - window_start > 3600:  # noqa: PLR2004
-            count, window_start = 0, now
-        count += 1
-        _contrib_rl[client_ip] = (count, window_start)
-        if count > 5:  # noqa: PLR2004
-            logger.warning(
-                json.dumps({"event": "contribute.ratelimit", "ip": _mask_ip(client_ip)})
+    payload = _canonicalize_contribution_payload(payload)
+    records = payload["records"]
+
+    envelope = _operation_envelope(
+        request,
+        payload,
+        "contribution",
+        max_age_ms=min(
+            CONTRIBUTION_QUARANTINE_TTL_SECONDS,
+            CONTRIBUTION_LEDGER_TERMINAL_RETENTION_SECONDS,
+        )
+        * 1000,
+    )
+    if envelope:
+        receipt_id, delete_hash, operation_id = envelope
+        delete_token = ""  # raw capability never crosses the create request boundary
+    else:
+        receipt_id, delete_token, operation_id = (
+            uuid.uuid4().hex,
+            generate_edit_token(),
+            "",
+        )
+        delete_hash = hash_edit_token(delete_token)
+    payload_digest = _canonical_payload_digest(payload)
+
+    async def _replay_if_same() -> JSONResponse | None:
+        if not envelope:
+            return None
+        try:
+            existing = await _CONTRIBUTION_LEDGER.get(receipt_id)
+        except ContributionLedgerError as exc:
+            raise _contribution_ledger_http_error(exc) from exc
+        if existing is None:
+            return None
+        operation = (
+            existing.get("operation")
+            if isinstance(existing.get("operation"), dict)
+            else {}
+        )
+        if (
+            not secrets.compare_digest(
+                str(operation.get("payloadDigest") or ""), payload_digest
             )
+            or not secrets.compare_digest(
+                str(operation.get("operationId") or ""), operation_id
+            )
+            or not secrets.compare_digest(
+                str(existing.get("deleteTokenHash") or ""), delete_hash
+            )
+        ):
             raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded. Maximum 5 contributions per hour.",
-                headers={"Retry-After": "3600"},
+                status_code=409,
+                detail="Operation identity was already used with different contribution content.",
             )
-
-    if not TRAINING_DATASET_REPO:
-        raise HTTPException(
-            status_code=503,
-            detail="Training endpoint not configured (TRAINING_DATASET_REPO not set).",
+        review = None
+        if (
+            _provider_review_enabled()
+            and str(existing.get("state") or "") == "quarantined"
+        ):
+            try:
+                review = await _ensure_provider_review(existing)
+            except StorageWriteError as exc:
+                logger.error(
+                    json.dumps(
+                        {"event": "contribute.review_recover_fail", "code": exc.code}
+                    )
+                )
+                raise HTTPException(
+                    status_code=503,
+                    detail="Contribution review could not be recovered.",
+                ) from exc
+        return _contribution_replay_response(
+            existing,
+            receipt_id=receipt_id,
+            delete_token=delete_token,
+            ledger_manifest=ledger_manifest,
+            replay=True,
+            review=review,
         )
-    if not HF_DATASET_TOKEN:
-        # HF_DATASET_TOKEN = HF_WRITE_TOKEN or HF_TOKEN (resolved at startup).
-        # Provide an actionable error that names the preferred variable first.
+
+    replay = await _replay_if_same()
+    if replay is not None:
+        logger.info(json.dumps({"event": "contribute.create_replay"}))
+        return replay
+
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _contrib_rl,
+        _contrib_rl_lock,
+        client_ip,
+        limit=CONTRIBUTION_RATE_LIMIT_PER_HOUR,
+        scope="contribution",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps({"event": "contribute.ratelimit", "ip": _mask_ip(client_ip)})
+        )
         raise HTTPException(
-            status_code=503,
-            detail=(
-                "No write token configured. "
-                "Set HF_WRITE_TOKEN (recommended, write-scoped) or HF_TOKEN "
-                "(legacy fallback) in Space → Settings → Repository secrets."
-            ),
+            status_code=429,
+            detail="Rate limit exceeded.",
+            headers={"Retry-After": "3600"},
         )
 
-    # Push to HF Dataset using the write-scoped token.
-    # HF_DATASET_TOKEN resolves to HF_WRITE_TOKEN when set, else HF_TOKEN.
-    # This ensures the inference token (HF_TOKEN, read-only) is never used
-    # for dataset write operations when a dedicated write token is available.
-    from huggingface_hub import CommitOperationAdd, HfApi  # noqa: PLC0415
-
-    api = HfApi(token=HF_DATASET_TOKEN)
-
-    # Compute server receive timestamp once so all rows in the batch share the
-    # same ``_ts`` value.  The previous inline ``int(_time.time() * 1000)``
-    # inside the list comprehension produced slightly different values per row.
-    _server_ts_ms: int = int(_time.time() * 1000)
-
-    # normalize_contribution_record maps legacy underscore-prefixed field names
-    # (_sessionId → conversationId, _page → page, _model → model,
-    # _consentVersion → consentVersion) to the canonical schema shared with the
-    # feedback endpoint.  It also normalises ratingLabel (slug vs Title Case),
-    # expands the model object to the full 8-key shape, and enforces key order.
-    # See _dataset_schema.py for the full canonical column list.
-    rows_jsonl = "\n".join(
-        json.dumps(
-            normalize_contribution_record(
-                rec,
-                envelope=payload,
-                server_ts_ms=_server_ts_ms,
-            ),
-            ensure_ascii=False,
+    server_ts_ms = int(_time.time() * 1000)
+    normalized = [
+        normalize_contribution_record(
+            rec,
+            envelope=payload,
+            server_ts_ms=server_ts_ms,
+            training_status="quarantined",
+            submission_id=receipt_id,
         )
         for rec in records
-        if isinstance(rec, dict)
+    ]
+    normalized = [
+        row
+        for row in normalized
+        if row.get("recordType") != "conversation" or bool(row.get("messages"))
+    ]
+    if not normalized:
+        raise HTTPException(
+            status_code=422, detail="No valid contribution records were supplied."
+        )
+    encoded = ("\n".join(json.dumps(r, ensure_ascii=False) for r in normalized)).encode(
+        "utf-8"
     )
-    filename = f"contributions/{int(_time.time() * 1000)}.jsonl"
+    expires_at = _time.time() + CONTRIBUTION_QUARANTINE_TTL_SECONDS
+    entry = {
+        "receiptId": receipt_id,
+        "state": "quarantined",
+        "records": normalized,
+        "bytes": len(encoded),
+        "deleteTokenHash": delete_hash,
+        "expiresAt": expires_at,
+        "receivedAt": _time.time(),
+        "dedupKeys": [
+            str(row.get("_dedup_key") or "")
+            for row in normalized
+            if row.get("_dedup_key")
+        ],
+        "storage": {},
+        "withdrawalStorage": {},
+        "currentViewRemoval": {},
+        "lastError": "",
+        "operation": {
+            "payloadDigest": payload_digest,
+            "operationId": operation_id if envelope else "",
+            "reviewRevision": 1,
+        },
+        "rowCount": len(normalized),
+    }
     try:
-        # Fix D: Guard against empty JSONL — an empty file would silently corrupt
-        # the dataset; fail fast with a clear error before touching HuggingFace.
-        if not rows_jsonl.strip():
+        await _CONTRIBUTION_LEDGER.create(entry)
+    except ContributionLedgerError as exc:
+        if envelope and exc.code == "DUPLICATE_RECEIPT":
+            replay = await _replay_if_same()
+            if replay is not None:
+                return replay
+        raise _contribution_ledger_http_error(exc) from exc
+
+    review = None
+    if _provider_review_enabled():
+        try:
+            review = await _ensure_provider_review(entry)
+        except StorageWriteError as exc:
+            # Leave the receipt in quarantine on ambiguous provider outcomes so
+            # the create-once replay can recover the deterministic native review.
+            # Definite failures are also retained for bounded TTL rather than
+            # pretending the submission never existed after consented intake.
             logger.error(
-                json.dumps(
-                    {
-                        "event": "contribute.empty_jsonl",
-                        "records": len(records),
-                        "detail": (
-                            "rows_jsonl is empty after serialising records; "
-                            "aborting HF commit to prevent corrupt dataset file."
-                        ),
-                    }
-                )
+                json.dumps({"event": "contribute.review_open_fail", "code": exc.code})
             )
             raise HTTPException(
-                status_code=422,
-                detail=(
-                    "No JSONL rows were produced from the submitted records. "
-                    "Verify that each record contains at least one non-empty field."
-                ),
-            )
-        # BUG-03 FIX: HfApi has no .commit() in any released version.
-        # Correct method is .create_commit() (stable since huggingface_hub 0.14,
-        # fully supported through the declared ~=0.23.0 dependency range).
-        # Without this fix, every POST would AttributeError → silent 503.
-        #
-        # Fix 3: api.create_commit is a synchronous HTTP call.  Calling it
-        # directly inside an async handler blocks the uvicorn event loop for the
-        # entire HuggingFace round-trip.  asyncio.to_thread() offloads the call
-        # to a worker thread, keeping the loop free for other requests.
-        await asyncio.to_thread(
-            api.create_commit,
-            repo_id=TRAINING_DATASET_REPO,
-            repo_type="dataset",
-            operations=[
-                CommitOperationAdd(
-                    path_in_repo=filename,
-                    path_or_fileobj=rows_jsonl.encode(),
-                )
-            ],
-            commit_message=f"Add {len(records)} contribution record(s)",
-        )
-    except Exception as exc:
-        logger.error(json.dumps({"event": "contribute.hf_fail", "error": str(exc)}))
-        raise HTTPException(
-            status_code=503,
-            detail="Failed to store contribution. Try again later.",
-        ) from exc
+                status_code=503,
+                detail="Contribution was quarantined but its provider review could not be opened. Retry the same submission.",
+            ) from exc
 
     logger.info(
         json.dumps(
             {
-                "event": "contribute.write",
-                "rows": len(records),
-                "ip": _mask_ip(client_ip),
+                "event": "contribute.quarantined",
+                "rows": len(normalized),
+                "idempotent": bool(envelope),
+                "review_mode": CONTRIBUTION_REVIEW_MODE,
+                "review_provider": (
+                    getattr(review, "provider", None) if review is not None else None
+                ),
             }
         )
     )
-    return JSONResponse({"contributed": True, "rows": len(records)})
+    return _contribution_replay_response(
+        entry,
+        receipt_id=receipt_id,
+        delete_token=delete_token,
+        ledger_manifest=ledger_manifest,
+        replay=False,
+        review=review,
+    )
 
 
-@app.post("/v1/share")
-async def share(request: Request) -> JSONResponse:
-    """Accept a conversation snapshot for global sharing.
+def _validate_contribution_update_payload(payload: Any) -> list[Any]:
+    """Validate the same public contribution contract used by intake."""
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422, detail="Contribution body must be a JSON object."
+        )
+    if payload.get("consentFlag") is not True:
+        raise HTTPException(
+            status_code=422, detail="Explicit contribution consent is required."
+        )
+    schema_version = payload.get("schemaVersion")
+    if schema_version not in {2, 3, 4}:
+        raise HTTPException(
+            status_code=422, detail="Unsupported contribution schemaVersion."
+        )
+    consent_version = payload.get("consentVersion")
+    consent_ok = (
+        consent_version == RESERVED_CONSENT_VERSION
+        if schema_version == 4  # ruff: ignore[magic-value-comparison]
+        else consent_version in (LEGACY_CONSENT_VERSIONS | {RESERVED_CONSENT_VERSION})
+    )
+    if not consent_ok:
+        raise HTTPException(
+            status_code=422,
+            detail="Consent text changed or is missing. Reload the page and review consent again.",
+        )
+    records = payload.get("records")
+    if not isinstance(records, list) or not records:
+        raise HTTPException(status_code=422, detail="records must be a non-empty list.")
+    if len(records) > MAX_CONTRIBUTION_RECORDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Too many records. Maximum {MAX_CONTRIBUTION_RECORDS} per request.",
+        )
+    if schema_version == 4:  # ruff: ignore[magic-value-comparison]
+        _strict_current_contribution_records(records)
+    return records
 
-    Parameters
-    ----------
-    request : fastapi.Request
-        HTTP request.  Body must be JSON with at minimum a ``content`` field.
 
-    Returns
-    -------
-    fastapi.responses.JSONResponse
-        ``{"uuid": "<hex>", "url": "<share_url>", "expiresAt": "<ISO-8601>"}``
-        on success.
+@app.put("/v1/contribute/{receipt_id}")
+async def update_pending_contribution(
+    receipt_id: str, request: Request
+) -> JSONResponse:
+    """Replace a pending review instead of opening a duplicate PR/MR."""
+    ledger_manifest = _CONTRIBUTION_LEDGER.manifest()
+    entry = await _authorized_contribution_entry(receipt_id, request)
+    current_review = None
+    if str(entry.get("state") or "") == "quarantined" and _provider_review_enabled():
+        try:
+            entry, current_review = await _sync_provider_review_merge(entry)
+        except StorageWriteError as exc:
+            logger.warning(
+                json.dumps(
+                    {"event": "contribute.review_update_status_fail", "code": exc.code}
+                )
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Contribution review status could not be verified.",
+            ) from exc
+    if str(entry.get("state") or "") != "quarantined":
+        raise HTTPException(
+            status_code=409, detail="Only a pending contribution review can be updated."
+        )
 
-    Raises
-    ------
-    fastapi.HTTPException
-        400 when the body is not valid JSON.
-        413 when the body exceeds :data:`~_shared_logic.DEFAULT_MAX_BODY_BYTES`.
-        422 when ``content`` is missing or empty.
-        429 when the IP rate limit (10/hour) is exceeded.
-
-    Notes
-    -----
-    **User note** — Stored shares are ephemeral: they live only for the lifetime
-    of the process.  A Space restart (or scale-to-zero cold start) clears all
-    shares.  For persistent storage, set ``TRAINING_DATASET_REPO`` and use the
-    ``/v1/contribute`` endpoint instead.
-
-    **User note** — The returned ``url`` points to
-    ``GET /v1/share/{uuid}`` on this proxy.  Distribute that link to share the
-    conversation.
-
-    **Developer note** — ``ttlDays`` is clamped to ``[1, 365]``.  Expired
-    entries are evicted lazily: on every write, entries whose
-    ``expiresAt_ts`` has passed are removed before the new entry is stored.
-    This keeps memory bounded without a background task.
-
-    **Developer note** — Rate limit (10/hour per IP) is intentionally more
-    permissive than ``/v1/contribute`` because share payloads are user-facing
-    outputs, not GDPR-sensitive training data.
-    """
-    # Body size guard
-    raw = await request.body()
-    if len(raw) > DEFAULT_MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Payload too large.")
-
+    raw = await _read_limited_body(request, CONTRIBUTION_MAX_BODY_BYTES, "Contribution")
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+    records = _validate_contribution_update_payload(payload)
+    payload = _canonicalize_contribution_payload(payload)
+    records = payload["records"]
+    payload_digest = _canonical_payload_digest(payload)
+    operation = (
+        entry.get("operation") if isinstance(entry.get("operation"), dict) else {}
+    )
+    current_digest = str(operation.get("payloadDigest") or "")
 
-    # Required field: content
-    content = payload.get("content", "")
-    if not content or not isinstance(content, str):
-        raise HTTPException(
-            status_code=422,
-            detail="content is required and must be a non-empty string.",
+    if current_digest and secrets.compare_digest(current_digest, payload_digest):
+        review = current_review
+        if review is None and _provider_review_enabled():
+            try:
+                review = await _ensure_provider_review(entry)
+            except StorageWriteError as exc:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Contribution review could not be recovered.",
+                ) from exc
+        logger.info(json.dumps({"event": "contribute.review_duplicate_suppressed"}))
+        return _contribution_replay_response(
+            entry,
+            receipt_id=receipt_id,
+            delete_token="",
+            ledger_manifest=ledger_manifest,
+            replay=True,
+            review=review,
+            review_update="unchanged",
         )
 
-    mime_type: str = payload.get("mimeType") or "text/html;charset=utf-8"
-    ext: str = payload.get("ext") or ".html"
-    title: str = payload.get("title") or "Shared conversation"
-    ttl_days: int = max(1, min(_safe_int(payload.get("ttlDays"), 30), 365))
-
-    # Per-IP rate limit: 10 shares per hour
-    client_ip = _client_ip(request)
-    async with _share_rl_lock:
-        now = _time.time()
-        count, window_start = _share_rl.get(client_ip, (0, now))
-        if now - window_start > 3600:  # noqa: PLR2004
-            count, window_start = 0, now
-        count += 1
-        _share_rl[client_ip] = (count, window_start)
-        if count > 10:  # noqa: PLR2004
-            logger.warning(
-                json.dumps({"event": "share.ratelimit", "ip": _mask_ip(client_ip)})
+    server_ts_ms = int(_time.time() * 1000)
+    normalized = [
+        normalize_contribution_record(
+            rec,
+            envelope=payload,
+            server_ts_ms=server_ts_ms,
+            training_status="quarantined",
+            submission_id=receipt_id,
+        )
+        for rec in records
+    ]
+    normalized = [
+        row
+        for row in normalized
+        if row.get("recordType") != "conversation" or bool(row.get("messages"))
+    ]
+    if not normalized:
+        raise HTTPException(
+            status_code=422, detail="No valid contribution records were supplied."
+        )
+    encoded = ("\n".join(json.dumps(r, ensure_ascii=False) for r in normalized)).encode(
+        "utf-8"
+    )
+    next_revision = max(1, int(operation.get("reviewRevision") or 1)) + 1
+    review = current_review
+    if _provider_review_enabled():
+        eligible_bytes = _provider_review_content({"records": normalized})
+        try:
+            review = await _STORAGE.update_contribution_review(
+                receipt_id=receipt_id,
+                content=eligible_bytes,
+                commit_message=f"Update dataset contribution review (revision {next_revision})",
+                path_timestamp=float(entry.get("receivedAt") or _time.time()),
+                review_hint=(
+                    entry.get("storage")
+                    if isinstance(entry.get("storage"), dict)
+                    else None
+                ),
+            )
+        except StorageWriteError as exc:
+            if exc.code in {"REVIEW_CLOSED", "REVIEW_MERGED", "REVIEW_NOT_FOUND"}:
+                raise HTTPException(
+                    status_code=409,
+                    detail="The existing repository review is no longer open for updates.",
+                ) from exc
+            logger.error(
+                json.dumps({"event": "contribute.review_update_fail", "code": exc.code})
             )
             raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded. Maximum 10 shares per hour.",
-                headers={"Retry-After": "3600"},
+                status_code=503,
+                detail="The existing repository review could not be updated safely.",
+            ) from exc
+
+    try:
+        updated = await _CONTRIBUTION_LEDGER.replace_pending_payload(
+            receipt_id,
+            records=normalized,
+            byte_count=len(encoded),
+            dedup_keys=[
+                str(row.get("_dedup_key") or "")
+                for row in normalized
+                if row.get("_dedup_key")
+            ],
+            payload_digest=payload_digest,
+            row_count=len(normalized),
+            storage=(
+                review.storage_metadata()
+                if review is not None
+                else (
+                    entry.get("storage")
+                    if isinstance(entry.get("storage"), dict)
+                    else {}
+                )
+            ),
+        )
+    except ContributionLedgerError as exc:
+        logger.error(
+            json.dumps(
+                {"event": "contribute.review_update_ledger_fail", "code": exc.code}
+            )
+        )
+        raise _contribution_ledger_http_error(exc) from exc
+
+    logger.info(
+        json.dumps(
+            {
+                "event": "contribute.review_updated",
+                "rows": len(normalized),
+                "revision": int(
+                    (updated.get("operation") or {}).get("reviewRevision")
+                    or next_revision
+                ),
+                "review_provider": (
+                    getattr(review, "provider", None) if review else None
+                ),
+            }
+        )
+    )
+    return _contribution_replay_response(
+        updated,
+        receipt_id=receipt_id,
+        delete_token="",
+        ledger_manifest=ledger_manifest,
+        replay=False,
+        review=review,
+        review_update="updated",
+    )
+
+
+async def _authorized_contribution_entry(
+    receipt_id: str, request: Request
+) -> dict[str, Any]:
+    try:
+        entry = await _CONTRIBUTION_LEDGER.get(receipt_id)
+    except ContributionLedgerError as exc:
+        raise _contribution_ledger_http_error(exc) from exc
+    if entry is None:
+        raise HTTPException(status_code=404, detail="Contribution receipt not found.")
+    supplied = request.headers.get("X-Contribution-Delete-Token", "")
+    if not supplied or not verify_edit_token(
+        supplied, str(entry.get("deleteTokenHash") or "")
+    ):
+        raise HTTPException(
+            status_code=403, detail="Invalid contribution management capability."
+        )
+    return entry
+
+
+@app.get("/v1/contribute/{receipt_id}")
+async def contribution_status(receipt_id: str, request: Request) -> JSONResponse:
+    """Return capability-protected lifecycle status without returning content."""
+    entry = await _authorized_contribution_entry(receipt_id, request)
+    review = None
+    if _provider_review_enabled() and str(entry.get("state") or "") == "quarantined":
+        try:
+            entry, review = await _sync_provider_review_merge(entry)
+        except StorageWriteError as exc:
+            logger.warning(
+                json.dumps({"event": "contribute.review_status_fail", "code": exc.code})
+            )
+    body = _contribution_status_payload(entry)
+    body["reviewMode"] = CONTRIBUTION_REVIEW_MODE
+    if review is not None:
+        body["reviewProvider"] = review.provider
+        body["reviewStatus"] = review.status
+    body.update(_contribution_review_reference(entry, review))
+    return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+
+@app.delete("/v1/contribute/{receipt_id}")
+async def delete_or_withdraw_contribution(  # ruff: ignore[too-many-branches]
+    receipt_id: str, request: Request
+) -> JSONResponse:
+    """Delete pending data or withdraw a previously promoted contribution.
+
+    Pending deletion removes content from the active mutable ledger before it
+    leaves for training storage.  It is not represented as forensic filesystem
+    erasure. After promotion the same capability means *withdraw
+    from training*: a privacy-minimal tombstone is durably written and the
+    current provider branch view is removed best-effort.  Versioned provider/Git
+    history is explicitly not represented as physically erased.
+    """
+    entry = await _authorized_contribution_entry(receipt_id, request)
+    state = str(entry.get("state") or "")
+
+    if state == "quarantined" and _provider_review_enabled():
+        try:
+            entry, _review = await _sync_provider_review_merge(entry)
+            state = str(entry.get("state") or "")
+            if state == "quarantined":
+                close_result = await _STORAGE.close_contribution_review(
+                    receipt_id,
+                    review_hint=(
+                        entry.get("storage")
+                        if isinstance(entry.get("storage"), dict)
+                        else None
+                    ),
+                )
+                logger.info(
+                    json.dumps(
+                        {"event": "contribute.review_closed", "result": close_result}
+                    )
+                )
+        except StorageWriteError as exc:
+            logger.error(
+                json.dumps({"event": "contribute.review_close_fail", "code": exc.code})
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Contribution review could not be closed safely.",
+            ) from exc
+
+    if state == "quarantined":
+        try:
+            deleted = await _CONTRIBUTION_LEDGER.delete_pending(receipt_id)
+        except ContributionLedgerError as exc:
+            raise _contribution_ledger_http_error(exc) from exc
+        logger.info(json.dumps({"event": "contribute.pending_deleted"}))
+        return JSONResponse(
+            {
+                "deleted": True,
+                **_contribution_status_payload(deleted),
+            }
+        )
+    if state == "deleted":
+        return JSONResponse({"deleted": True, **_contribution_status_payload(entry)})
+    if state == "expired":
+        raise HTTPException(status_code=410, detail="Pending contribution expired.")
+    if state in {"promoting", "withdrawing"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Contribution lifecycle operation already in progress.",
+        )
+    if state == "withdrawn":
+        return JSONResponse(
+            {
+                "withdrawn": True,
+                **_contribution_status_payload(entry),
+                "currentViewRemoval": entry.get("currentViewRemoval") or {},
+            }
+        )
+    if state not in {"eligible", "promotion_uncertain", "withdrawal_uncertain"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Contribution cannot be managed in its current state.",
+        )
+
+    try:
+        claimed = await _CONTRIBUTION_LEDGER.begin_withdrawal(receipt_id)
+        operation_claim = str(claimed.get("operationClaim") or "") or None
+    except ContributionLedgerError as exc:
+        raise _contribution_ledger_http_error(exc) from exc
+
+    dedup_keys = [
+        str(v) for v in claimed.get("dedupKeys", []) if isinstance(v, str) and v
+    ]
+    try:
+        promoted_at = float(
+            claimed.get("promotedAt") or claimed.get("receivedAt") or _time.time()
+        )
+        withdrawal_receipt = await _persist_contribution_withdrawal(
+            dedup_keys,
+            commit_message=f"Withdraw reviewed contribution receipt ({len(dedup_keys)} record(s))",
+            server_ts_ms=int(promoted_at * 1000) + 1,
+            path_timestamp=promoted_at,
+        )
+    except StorageWriteError as exc:
+        await _CONTRIBUTION_LEDGER.withdrawal_failed(
+            receipt_id, exc.code, claim_token=operation_claim
+        )
+        logger.error(
+            json.dumps({"event": "contribute.withdraw_fail", "code": exc.code})
+        )
+        raise HTTPException(
+            status_code=503, detail="Failed to persist training withdrawal."
+        ) from exc
+
+    original_storage = (
+        claimed.get("storage") if isinstance(claimed.get("storage"), dict) else {}
+    )
+    removal = await _STORAGE.remove_current_view(
+        dict(original_storage.get("paths") or {}),
+        record_id=str(original_storage.get("recordId") or "") or None,
+    )
+    withdrawal_meta = _storage_receipt_metadata(withdrawal_receipt)
+    try:
+        withdrawn = await _CONTRIBUTION_LEDGER.mark_withdrawn(
+            receipt_id,
+            withdrawal_storage=withdrawal_meta,
+            current_view_removal=removal,
+            claim_token=operation_claim,
+        )
+    except ContributionLedgerError as exc:
+        # The authoritative training withdrawal already exists. Do not retry the
+        # eligible write or falsely report erasure; surface control-plane failure.
+        logger.error(
+            json.dumps({"event": "contribute.withdraw_ledger_fail", "code": exc.code})
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Training withdrawal persisted but lifecycle confirmation failed.",
+        ) from exc
+
+    logger.info(json.dumps({"event": "contribute.withdrawn", "rows": len(dedup_keys)}))
+    return JSONResponse(
+        {
+            "withdrawn": True,
+            **_contribution_status_payload(withdrawn),
+            "currentViewRemoval": removal,
+            "trainingWithdrawalRecordId": withdrawal_meta.get("recordId"),
+        },
+        status_code=202,
+    )
+
+
+@app.post("/v1/contribute/{receipt_id}/promote")
+async def promote_contribution(  # ruff: ignore[too-many-branches]
+    receipt_id: str,
+    request: Request,
+) -> JSONResponse:
+    """Atomically claim review, then promote only once to training-eligible storage."""
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:] if auth.lower().startswith("bearer ") else ""
+    if not CONTRIBUTION_REVIEW_TOKEN or not secrets.compare_digest(
+        token, CONTRIBUTION_REVIEW_TOKEN
+    ):
+        raise HTTPException(
+            status_code=401, detail="Contribution review authorization required."
+        )
+    if _STORAGE.primary is None:
+        raise HTTPException(
+            status_code=503, detail="Training storage is not configured."
+        )
+    try:
+        entry = await _CONTRIBUTION_LEDGER.begin_promotion(receipt_id)
+        operation_claim = str(entry.get("operationClaim") or "") or None
+    except ContributionLedgerError as exc:
+        raise _contribution_ledger_http_error(exc) from exc
+
+    reviewed = []
+    for row in entry.get("records", []):
+        if not isinstance(row, dict):
+            continue
+        promoted = dict(row)
+        promoted["trainingStatus"] = "eligible"
+        reviewed.append(promoted)
+    if not reviewed:
+        await _CONTRIBUTION_LEDGER.promotion_failed(
+            receipt_id, "EMPTY_REVIEW", claim_token=operation_claim
+        )
+        raise HTTPException(
+            status_code=409, detail="Contribution contains no reviewable records."
+        )
+
+    content = ("\n".join(json.dumps(r, ensure_ascii=False) for r in reviewed)).encode(
+        "utf-8"
+    )
+    try:
+        if _provider_review_enabled():
+            # The native provider review already contains these exact eligible
+            # bytes. Merge the PR/MR instead of creating a second direct commit.
+            prepared_review = await _ensure_provider_review(entry)
+            merged_review = await _STORAGE.merge_contribution_review(
+                receipt_id,
+                review_hint=(
+                    entry.get("storage")
+                    if isinstance(entry.get("storage"), dict)
+                    else None
+                ),
+            )
+            if prepared_review is None:
+                raise StorageWriteError("REVIEW_NOT_FOUND")
+            receipt = replace(prepared_review, status=merged_review.status)
+        else:
+            receipt = await _persist_storage_record(
+                kind="contributions",
+                content=content,
+                commit_message=f"Promote {len(reviewed)} reviewed contribution record(s)",
+                path_timestamp=float(entry.get("receivedAt") or _time.time()),
+            )
+    except StorageWriteError as exc:
+        if bool(getattr(exc, "transient", False)):
+            try:
+                await _CONTRIBUTION_LEDGER.mark_promotion_uncertain(
+                    receipt_id, exc.code, claim_token=operation_claim
+                )
+            except ContributionLedgerError as ledger_exc:
+                logger.error(
+                    json.dumps(
+                        {
+                            "event": "contribute.promote_uncertain_ledger_fail",
+                            "code": ledger_exc.code,
+                        }
+                    )
+                )
+            logger.error(
+                json.dumps(
+                    {"event": "contribute.promote_outcome_uncertain", "code": exc.code}
+                )
+            )
+            raise HTTPException(
+                status_code=503,
+                detail="Training storage outcome is uncertain; re-promotion is blocked. Use the contribution management capability to withdraw it or reconcile operationally.",
+            ) from exc
+        await _CONTRIBUTION_LEDGER.promotion_failed(
+            receipt_id, exc.code, claim_token=operation_claim
+        )
+        logger.error(json.dumps({"event": "contribute.promote_fail", "code": exc.code}))
+        raise HTTPException(
+            status_code=503, detail="Failed to store reviewed contribution."
+        ) from exc
+
+    storage_meta = (
+        receipt.storage_metadata()
+        if _provider_review_enabled()
+        else _storage_receipt_metadata(receipt)
+    )
+    try:
+        await _CONTRIBUTION_LEDGER.mark_promoted(
+            receipt_id, storage=storage_meta, claim_token=operation_claim
+        )
+    except ContributionLedgerError as exc:
+        # Durable eligible bytes now exist but the mutable ledger could not
+        # confirm them. Fail safe by writing withdrawal tombstones immediately;
+        # never reopen the receipt for a second promotion race.
+        dedup_keys = [
+            str(v) for v in entry.get("dedupKeys", []) if isinstance(v, str) and v
+        ]
+        compensation = "not-attempted"
+        try:
+            compensation_ts = (
+                max(
+                    [
+                        int(r.get("_ts") or 0)
+                        for r in entry.get("records", [])
+                        if isinstance(r, dict)
+                    ]
+                    or [0]
+                )
+                + 1
+            )
+            received_at = float(entry.get("receivedAt") or _time.time())
+            await _persist_contribution_withdrawal(
+                dedup_keys,
+                commit_message="Compensate unconfirmed contribution promotion",
+                server_ts_ms=compensation_ts,
+                path_timestamp=received_at,
+            )
+            compensation = "withdrawal-persisted"
+            await _STORAGE.remove_current_view(
+                dict(storage_meta.get("paths") or {}),
+                record_id=str(storage_meta.get("recordId") or "") or None,
+            )
+        except StorageWriteError:
+            compensation = "withdrawal-failed"
+        logger.error(
+            json.dumps(
+                {
+                    "event": "contribute.promote_ledger_fail",
+                    "code": exc.code,
+                    "compensation": compensation,
+                }
+            )
+        )
+        raise HTTPException(
+            status_code=503, detail="Promotion could not be safely finalized."
+        ) from exc
+
+    logger.info(json.dumps({"event": "contribute.promoted", "rows": len(reviewed)}))
+    return JSONResponse(
+        {
+            "promoted": True,
+            "status": "eligible",
+            "rows": len(reviewed),
+            "recordId": receipt.record_id,
+            "primary": (
+                receipt.review_url if _provider_review_enabled() else receipt.primary
+            ),
+            "mirrors": {} if _provider_review_enabled() else receipt.mirrors,
+            "reviewMode": CONTRIBUTION_REVIEW_MODE,
+        }
+    )
+
+
+@app.post("/v1/share")
+async def share(  # ruff: ignore[too-many-branches]
+    request: Request,
+) -> JSONResponse:
+    """Create a Global Share with optional create-once recovery semantics.
+
+    Current browser clients create the public locator and revoke capability
+    before the request, then send only ``operationId``, the locator, and
+    ``SHA-256(revoke_capability)``. If the response is lost, retrying the *same*
+    reviewed payload resolves to the same object instead of creating an orphan.
+    The raw management capability never crosses the create-request boundary.
+    """
+    store_status = _require_share_store_ready()
+    raw = await _read_limited_body(request, SHARE_MAX_BODY_BYTES, "Share")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Share body must be an object.")
+
+    if SHARE_WRITE_TOKEN:
+        auth = request.headers.get("authorization", "")
+        provided = auth[7:] if auth.lower().startswith("bearer ") else ""
+        if not provided or not secrets.compare_digest(provided, SHARE_WRITE_TOKEN):
+            logger.warning(json.dumps({"event": "share.auth_fail"}))
+            raise HTTPException(
+                status_code=401, detail="Not authorized to create shares."
             )
 
-    share_id: str = uuid.uuid4().hex
+    try:
+        snapshot = canonicalize_share_snapshot(payload.get("snapshot"))
+        fmt = validate_share_format(payload.get("format"))
+    except ShareValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    ttl_days = max(1, min(_safe_int(payload.get("ttlDays"), 30), 365))
+    canonical_bytes = len(
+        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    if canonical_bytes > SHARE_MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=413, detail="Canonical share payload too large."
+        )
+
+    envelope = _operation_envelope(
+        request, payload, "share", max_age_ms=ttl_days * 86400 * 1000
+    )
+    if envelope:
+        share_id, edit_hash, operation_id = envelope
+        edit_token = ""  # raw revoke capability remains browser-only on create
+    else:
+        share_id, edit_token, operation_id = uuid.uuid4().hex, generate_edit_token(), ""
+        edit_hash = hash_edit_token(edit_token)
+    payload_digest = _canonical_payload_digest(
+        {"snapshot": snapshot, "format": fmt, "ttlDays": ttl_days}
+    )
+    base_url = _share_public_base(request)
+
+    async def _replay_if_same() -> JSONResponse | None:
+        if not envelope:
+            return None
+        try:
+            existing = await _SHARE_STORE.get(share_id)
+        except ShareStoreError as exc:
+            if exc.code == "EXPIRED":
+                raise _share_store_http_error(exc) from exc
+            raise _share_store_http_error(exc) from exc
+        if existing is None:
+            return None
+        if (
+            not secrets.compare_digest(
+                str(existing.get("operation_payload_digest") or ""), payload_digest
+            )
+            or not secrets.compare_digest(
+                str(existing.get("operation_id") or ""), operation_id
+            )
+            or not secrets.compare_digest(
+                str(existing.get("edit_hash") or ""), edit_hash
+            )
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Operation identity was already used with different Share content.",
+            )
+        body = {
+            "uuid": share_id,
+            "url": f"{base_url}/v1/share#share={share_id}",
+            "expiresAt": existing.get("expiresAt"),
+            "idempotentReplay": True,
+            "storage": store_status,
+        }
+        if edit_token:
+            body["editToken"] = edit_token
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+    replay = await _replay_if_same()
+    if replay is not None:
+        logger.info(json.dumps({"event": "share.create_replay", "format": fmt}))
+        return replay
+
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _share_rl,
+        _share_rl_lock,
+        client_ip,
+        limit=SHARE_RATE_LIMIT_PER_HOUR,
+        scope="share",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps({"event": "share.ratelimit", "ip": _mask_ip(client_ip)})
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for Global Share writes.",
+            headers={"Retry-After": "3600"},
+        )
+
     now_ts = _time.time()
     expires_ts = now_ts + ttl_days * 86400
     expires_iso = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(expires_ts))
-
-    # Store in memory; evict expired entries lazily on each write.
-    async with _share_store_lock:
-        expired_keys = [
-            k for k, v in _share_store.items() if v["expiresAt_ts"] < now_ts
-        ]
-        for k in expired_keys:
-            del _share_store[k]
-        _share_store[share_id] = {
-            "content": content,
-            "mimeType": mime_type,
-            "ext": ext,
-            "title": title,
-            "expiresAt_ts": expires_ts,
-            "expiresAt": expires_iso,
-        }
+    entry = {
+        "snapshot": snapshot,
+        "format": fmt,
+        "edit_hash": edit_hash,
+        "bytes": canonical_bytes,
+        "expiresAt_ts": expires_ts,
+        "expiresAt": expires_iso,
+        "transport_version": SHARE_TRANSPORT_VERSION,
+        "operation_payload_digest": payload_digest if envelope else "",
+        "operation_id": operation_id if envelope else "",
+    }
+    _sync_share_store_runtime_limits()
+    try:
+        await _SHARE_STORE.create(share_id, entry)
+    except ShareStoreError as exc:
+        # Concurrent safe retries race on the same deterministic locator. Re-read
+        # and return the existing object when the reviewed payload is identical.
+        if envelope and exc.code == "DUPLICATE_SHARE":
+            replay = await _replay_if_same()
+            if replay is not None:
+                return replay
+        raise _share_store_http_error(exc) from exc
 
     logger.info(
         json.dumps(
             {
                 "event": "share.create",
-                "id": share_id,
                 "ip": _mask_ip(client_ip),
+                "bytes": canonical_bytes,
+                "format": fmt,
                 "ttl_days": ttl_days,
+                "idempotent": bool(envelope),
             }
         )
     )
+    body = {
+        "uuid": share_id,
+        "url": f"{base_url}/v1/share#share={share_id}",
+        "expiresAt": expires_iso,
+        "idempotentReplay": False,
+        "storage": store_status,
+    }
+    if edit_token:
+        body["editToken"] = edit_token
+    return JSONResponse(body, headers={"Cache-Control": "no-store"})
 
-    base_url = str(request.base_url).rstrip("/")
-    share_url = f"{base_url}/v1/share/{share_id}"
 
-    return JSONResponse({"uuid": share_id, "url": share_url, "expiresAt": expires_iso})
+_SHARE_LOCATOR_BODY_BYTES = 4096
 
 
-@app.get("/v1/share/{share_id}")
-async def share_get(share_id: str) -> Response:
-    """Retrieve a shared conversation snapshot by UUID.
+def _parse_share_locator_payload(raw: bytes) -> str:
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Share body must be an object.")
+    share_id = payload.get("shareId")
+    if not isinstance(share_id, str) or not valid_share_id(share_id):
+        raise HTTPException(status_code=404, detail="Share not found or expired.")
+    return share_id
 
-    Parameters
-    ----------
-    share_id : str
-        UUID hex string returned by ``POST /v1/share``.
 
-    Returns
-    -------
-    fastapi.Response
-        The stored content with its original MIME type and a
-        ``Content-Disposition: inline`` header.
-
-    Raises
-    ------
-    fastapi.HTTPException
-        404 when the UUID is not found.
-        410 when the share exists but has expired.
-
-    Notes
-    -----
-    **User note** — Shares are stored in process memory only.  A Space
-    restart clears all shares, returning 404 for previously valid links.
-    """
-    async with _share_store_lock:
-        entry = _share_store.get(share_id)
-
+async def _share_lookup_live(share_id: str) -> dict[str, Any]:
+    _require_share_store_ready()
+    try:
+        entry = await _SHARE_STORE.get(share_id)
+    except ShareStoreError as exc:
+        raise _share_store_http_error(exc) from exc
     if entry is None:
         raise HTTPException(status_code=404, detail="Share not found or expired.")
+    return entry
 
-    if entry["expiresAt_ts"] < _time.time():
-        async with _share_store_lock:
-            _share_store.pop(share_id, None)
-        raise HTTPException(status_code=410, detail="Share has expired.")
 
+def _legacy_share_entry_allowed(entry: dict[str, Any]) -> bool:
+    """Allow capability-bearing paths only for genuinely pre-generation entries.
+
+    Missing generation metadata is the compatibility marker for objects created
+    before Run 14. Unknown/tampered values fail closed. New or fixed-path-updated
+    entries are generation 2 and cannot be read, probed, updated or revoked via
+    ``/v1/share/{id}``.
+    """
+    version = entry.get("transport_version")
+    return version is None or version == 1
+
+
+def _require_legacy_share_entry(entry: dict[str, Any]) -> None:
+    if not _legacy_share_entry_allowed(entry):
+        raise HTTPException(status_code=404, detail="Share not found or expired.")
+
+
+def _legacy_share_headers(entry: dict[str, Any]) -> dict[str, str]:
+    expires_ts = float(entry.get("expiresAt_ts") or 0)
+    sunset = (
+        _time.strftime("%a, %d %b %Y %H:%M:%S GMT", _time.gmtime(expires_ts))
+        if expires_ts > 0
+        else ""
+    )
+    headers = {
+        # RFC 9745 Structured Field Date: Run 14 deprecation effective
+        # 2026-08-29T00:00:00Z.
+        "Deprecation": "@1787961600",
+        "Link": '</v1/share>; rel="successor-version"',
+    }
+    if sunset:
+        headers["Sunset"] = sunset
+    return headers
+
+
+@app.get("/v1/share")
+async def share_viewer() -> Response:
+    """Serve a fixed-path viewer whose public capability stays in URL fragment."""
     return Response(
-        content=entry["content"],
+        content=render_share_viewer_shell("/v1/share/read"),
         status_code=200,
-        media_type=entry.get("mimeType", "text/html;charset=utf-8"),
+        media_type="text/html",
         headers={
-            "Content-Disposition": (
-                f'inline; filename="share{entry.get("ext", ".html")}"'
+            "Cache-Control": "private, no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "X-Frame-Options": "DENY",
+            "Referrer-Policy": "no-referrer",
+            "Permissions-Policy": (
+                "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()"
+            ),
+            "X-Robots-Tag": "noindex, nofollow, noarchive",
+            "Content-Security-Policy": (
+                "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; "
+                "connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
             ),
         },
     )
 
 
-@app.patch("/v1/share/{share_id}")
-async def share_patch(share_id: str, request: Request) -> JSONResponse:
-    """Update an existing shared conversation snapshot in-place.
+@app.post("/v1/share/read")
+async def share_read_fixed(request: Request) -> JSONResponse:
+    """Resolve a public Share from a fixed path with its locator in the body."""
+    raw = await _read_limited_body(request, _SHARE_LOCATOR_BODY_BYTES, "Share locator")
+    share_id = _parse_share_locator_payload(raw)
+    try:
+        entry = await _share_lookup_live(share_id)
+    except HTTPException as exc:
+        if exc.status_code == 404:  # ruff: ignore[magic-value-comparison]
+            logger.info(json.dumps({"event": "share.miss"}))
+        raise
+    try:
+        content, _mime_type, _ext = render_share(entry["snapshot"], entry["format"])
+    except ShareValidationError as exc:
+        logger.error(json.dumps({"event": "share.corrupt_entry"}))
+        raise HTTPException(status_code=500, detail="Stored share is invalid.") from exc
+    logger.info(json.dumps({"event": "share.read", "format": entry["format"]}))
+    payload: dict[str, Any] = {
+        "format": entry["format"],
+        "expiresAt": entry["expiresAt"],
+        "filename": share_artifact_filename(entry["format"]),
+        "mimeType": _mime_type,
+    }
+    if entry["format"] == "html":
+        payload["snapshot"] = entry["snapshot"]
+    else:
+        payload["content"] = content
+    return JSONResponse(
+        payload,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "X-Robots-Tag": "noindex, nofollow, noarchive",
+        },
+    )
 
-    PATCH replaces the stored content while preserving the UUID and therefore
-    the public URL.  Callers — typically the browser JS after the user edits
-    a conversation — can refresh a previously shared link without distributing
-    a new URL.
 
-    Parameters
-    ----------
-    share_id : str
-        UUID hex string returned by the original ``POST /v1/share``.
-    request : fastapi.Request
-        HTTP request.  Body must be JSON with at minimum a ``content`` field.
-        Optional fields ``mimeType``, ``ext``, ``title``, and ``ttlDays``
-        override the stored values; omitted fields retain their stored value.
+@app.post("/v1/share/download")
+async def share_download_fixed(request: Request) -> Response:
+    """Download one canonical Global Share artifact from the fixed capability-safe path."""
+    raw = await _read_limited_body(request, _SHARE_LOCATOR_BODY_BYTES, "Share locator")
+    share_id = _parse_share_locator_payload(raw)
+    try:
+        entry = await _share_lookup_live(share_id)
+    except HTTPException as exc:
+        if exc.status_code == 404:  # ruff: ignore[magic-value-comparison]
+            logger.info(json.dumps({"event": "share.miss"}))
+        raise
+    try:
+        content, mime_type, ext = render_share(entry["snapshot"], entry["format"])
+    except ShareValidationError as exc:
+        logger.error(json.dumps({"event": "share.corrupt_entry"}))
+        raise HTTPException(status_code=500, detail="Stored share is invalid.") from exc
+    filename = share_artifact_filename(entry["format"])
+    headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Cache-Control": "private, no-store",
+        "Pragma": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": (
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()"
+        ),
+        "X-Robots-Tag": "noindex, nofollow, noarchive",
+    }
+    if ext == ".html":
+        headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        )
+    logger.info(json.dumps({"event": "share.download", "format": entry["format"]}))
+    return Response(
+        content=content, status_code=200, media_type=mime_type, headers=headers
+    )
 
-    Returns
-    -------
-    fastapi.responses.JSONResponse
-        ``{"uuid": "<hex>", "url": "<share_url>", "expiresAt": "<ISO-8601>"}``
-        on success — identical shape to ``POST /v1/share``.
 
-    Raises
-    ------
-    fastapi.HTTPException
-        400 when the body is not valid JSON.
-        404 when the UUID is not found (never existed or evicted on a prior
-            lazy sweep).
-        410 when the entry exists but has already expired.
-        413 when the body exceeds :data:`~_shared_logic.DEFAULT_MAX_BODY_BYTES`.
-        422 when ``content`` is missing or empty.
-        429 when the IP rate limit (shared with POST, 10/hour) is exceeded.
+@app.post("/v1/share/status")
+async def share_status_fixed(request: Request) -> Response:
+    """Probe lifecycle without putting the read capability in the request path."""
+    raw = await _read_limited_body(request, _SHARE_LOCATOR_BODY_BYTES, "Share locator")
+    share_id = _parse_share_locator_payload(raw)
+    entry = await _share_lookup_live(share_id)
+    logger.info(json.dumps({"event": "share.status", "format": entry["format"]}))
+    return Response(
+        status_code=200,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "X-Robots-Tag": "noindex, nofollow, noarchive",
+        },
+    )
 
-    Notes
-    -----
-    **User note** — TTL is reset from the time of the PATCH.  Patching a
-    link that would have expired tomorrow extends it by the full ``ttlDays``
-    value (default 30 days from now).
 
-    **Developer note** — Rate-limited via the same ``_share_rl`` store as
-    ``POST /v1/share``.  CREATE and UPDATE together count toward the
-    10 requests/hour ceiling, preventing PATCH from being used as a bypass.
-
-    **Developer note** — No ownership token is required; any caller who
-    knows the UUID may PATCH it.  This is intentional: the feature targets
-    closed documentation environments (internal Sphinx docs) where possession
-    of the UUID already implies authorisation.
-
-    **Developer note** — The lazy-eviction sweep that runs on ``POST /v1/share``
-    does NOT run here to avoid the overhead of a full store scan on every
-    update.  Expired entries are discovered on the existence check
-    (``expiresAt_ts < now``) and returned as 410, which the JS client treats
-    as a signal to fall back to a fresh POST.
-    """
-    # Body size guard
-    raw = await request.body()
-    if len(raw) > DEFAULT_MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Payload too large.")
-
+@app.post("/v1/share/update")
+async def share_update_fixed(request: Request) -> JSONResponse:
+    """Replace a Share using a fixed request path and private edit capability."""
+    raw = await _read_limited_body(
+        request, SHARE_MAX_BODY_BYTES + _SHARE_LOCATOR_BODY_BYTES, "Share"
+    )
     try:
         payload = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
-
-    content = payload.get("content", "")
-    if not content or not isinstance(content, str):
-        raise HTTPException(
-            status_code=422,
-            detail="content is required and must be a non-empty string.",
-        )
-
-    # Per-IP rate limit — shared with POST so CREATE+UPDATE count together.
-    client_ip = _client_ip(request)
-    async with _share_rl_lock:
-        now = _time.time()
-        count, window_start = _share_rl.get(client_ip, (0, now))
-        if now - window_start > 3600:  # noqa: PLR2004
-            count, window_start = 0, now
-        count += 1
-        _share_rl[client_ip] = (count, window_start)
-        if count > 10:  # noqa: PLR2004
-            logger.warning(
-                json.dumps({"event": "share.ratelimit", "ip": _mask_ip(client_ip)})
-            )
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded. Maximum 10 shares per hour.",
-                headers={"Retry-After": "3600"},
-            )
-
-    # Existence and expiry check (read lock only — no sweep needed here).
-    async with _share_store_lock:
-        entry = _share_store.get(share_id)
-
-    if entry is None:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="Share body must be an object.")
+    share_id = payload.get("shareId")
+    if not isinstance(share_id, str) or not valid_share_id(share_id):
         raise HTTPException(status_code=404, detail="Share not found or expired.")
-
-    if entry["expiresAt_ts"] < _time.time():
-        async with _share_store_lock:
-            _share_store.pop(share_id, None)
-        raise HTTPException(status_code=410, detail="Share has expired.")
-
-    # Merge: caller-supplied fields override stored values; omitted fields
-    # keep their existing values so a minimal {"content": "..."} body works.
-    mime_type: str = payload.get("mimeType") or entry.get(
-        "mimeType", "text/html;charset=utf-8"
+    entry = await _share_lookup_live(share_id)
+    edit_token = request.headers.get("x-share-edit-token", "")
+    if not verify_edit_token(edit_token, entry.get("edit_hash", "")):
+        logger.warning(json.dumps({"event": "share.edit_auth_fail"}))
+        raise HTTPException(status_code=403, detail="Invalid share edit capability.")
+    try:
+        snapshot = canonicalize_share_snapshot(payload.get("snapshot"))
+        fmt = validate_share_format(payload.get("format"))
+    except ShareValidationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    ttl_days = max(1, min(_safe_int(payload.get("ttlDays"), 30), 365))
+    canonical_bytes = len(
+        json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     )
-    ext: str = payload.get("ext") or entry.get("ext", ".html")
-    title: str = payload.get("title") or entry.get("title", "Shared conversation")
-    ttl_days: int = max(1, min(_safe_int(payload.get("ttlDays"), 30), 365))
-
+    if canonical_bytes > SHARE_MAX_BODY_BYTES:
+        raise HTTPException(
+            status_code=413, detail="Canonical share payload too large."
+        )
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _share_rl,
+        _share_rl_lock,
+        client_ip,
+        limit=SHARE_RATE_LIMIT_PER_HOUR,
+        scope="share",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps({"event": "share.ratelimit", "ip": _mask_ip(client_ip)})
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for Global Share writes.",
+            headers={"Retry-After": "3600"},
+        )
     now_ts = _time.time()
     expires_ts = now_ts + ttl_days * 86400
     expires_iso = _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime(expires_ts))
-
-    async with _share_store_lock:
-        _share_store[share_id] = {
-            "content": content,
-            "mimeType": mime_type,
-            "ext": ext,
-            "title": title,
-            "expiresAt_ts": expires_ts,
-            "expiresAt": expires_iso,
-        }
-
+    next_entry = {
+        "snapshot": snapshot,
+        "format": fmt,
+        "edit_hash": entry["edit_hash"],
+        "bytes": canonical_bytes,
+        "expiresAt_ts": expires_ts,
+        "expiresAt": expires_iso,
+        "transport_version": SHARE_TRANSPORT_VERSION,
+        # Updating the object consumes the create-operation digest; a later
+        # replay of the original create must not silently overwrite edits.
+        "operation_payload_digest": "",
+    }
+    try:
+        await _SHARE_STORE.replace_authorized(
+            share_id, hash_edit_token(edit_token), next_entry
+        )
+    except ShareStoreError as exc:
+        raise _share_store_http_error(exc) from exc
     logger.info(
         json.dumps(
             {
                 "event": "share.update",
-                "id": share_id,
                 "ip": _mask_ip(client_ip),
+                "bytes": canonical_bytes,
+                "format": fmt,
                 "ttl_days": ttl_days,
             }
         )
     )
+    base_url = _share_public_base(request)
+    return JSONResponse(
+        {
+            "uuid": share_id,
+            "url": f"{base_url}/v1/share#share={share_id}",
+            "expiresAt": expires_iso,
+        }
+    )
 
-    base_url = str(request.base_url).rstrip("/")
-    share_url = f"{base_url}/v1/share/{share_id}"
 
-    return JSONResponse({"uuid": share_id, "url": share_url, "expiresAt": expires_iso})
+@app.post("/v1/share/revoke")
+async def share_revoke_fixed(request: Request) -> JSONResponse:
+    """Revoke a Share using a fixed request path and memory-only edit token."""
+    raw = await _read_limited_body(request, _SHARE_LOCATOR_BODY_BYTES, "Share locator")
+    share_id = _parse_share_locator_payload(raw)
+    entry = await _share_lookup_live(share_id)
+    edit_token = request.headers.get("x-share-edit-token", "")
+    if not verify_edit_token(edit_token, entry.get("edit_hash", "")):
+        logger.warning(json.dumps({"event": "share.edit_auth_fail"}))
+        raise HTTPException(status_code=403, detail="Invalid share edit capability.")
+    try:
+        await _SHARE_STORE.delete_authorized(share_id, hash_edit_token(edit_token))
+    except ShareStoreError as exc:
+        raise _share_store_http_error(exc) from exc
+    logger.info(json.dumps({"event": "share.revoke"}))
+    return JSONResponse({"revoked": True}, headers={"Cache-Control": "no-store"})
+
+
+@app.head("/v1/share/{share_id}")
+async def share_head(share_id: str) -> Response:
+    """Deprecate lifecycle probe for pre-generation Share objects only."""
+    if not valid_share_id(share_id):
+        raise HTTPException(status_code=404, detail="Share not found or expired.")
+    entry = await _share_lookup_live(share_id)
+    _require_legacy_share_entry(entry)
+    logger.info(
+        json.dumps(
+            {
+                "event": "share.status",
+                "format": entry["format"],
+                "legacy_transport": True,
+            }
+        )
+    )
+    return Response(
+        status_code=200,
+        headers={
+            "Cache-Control": "private, no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Referrer-Policy": "no-referrer",
+            "X-Robots-Tag": "noindex, nofollow, noarchive",
+            **_legacy_share_headers(entry),
+        },
+    )
+
+
+@app.get("/v1/share/{share_id}")
+async def share_get(share_id: str) -> Response:
+    """Deprecate direct renderer for pre-generation Share objects only."""
+    if not valid_share_id(share_id):
+        raise HTTPException(status_code=404, detail="Share not found or expired.")
+    try:
+        entry = await _share_lookup_live(share_id)
+    except HTTPException as exc:
+        if exc.status_code == 404:  # ruff: ignore[magic-value-comparison]
+            logger.info(json.dumps({"event": "share.miss"}))
+        raise
+    _require_legacy_share_entry(entry)
+
+    try:
+        content, mime_type, _ext = render_share(entry["snapshot"], entry["format"])
+    except ShareValidationError as exc:
+        logger.error(json.dumps({"event": "share.corrupt_entry"}))
+        raise HTTPException(status_code=500, detail="Stored share is invalid.") from exc
+
+    headers = {
+        "Content-Disposition": (
+            f'inline; filename="{share_artifact_filename(entry["format"])}"'
+        ),
+        "Cache-Control": "private, no-store",
+        "Pragma": "no-cache",
+        "X-Content-Type-Options": "nosniff",
+        "X-Frame-Options": "DENY",
+        "Referrer-Policy": "no-referrer",
+        "Permissions-Policy": (
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), browsing-topics=()"
+        ),
+        "X-Robots-Tag": "noindex, nofollow, noarchive",
+        **_legacy_share_headers(entry),
+    }
+    if entry["format"] == "html":
+        headers["Content-Security-Policy"] = (
+            "sandbox; default-src 'none'; style-src 'unsafe-inline'; img-src data:; "
+            "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+        )
+    logger.info(json.dumps({"event": "share.read", "format": entry["format"]}))
+    return Response(
+        content=content, status_code=200, media_type=mime_type, headers=headers
+    )
+
+
+@app.patch("/v1/share/{share_id}")
+async def share_patch(share_id: str, request: Request) -> JSONResponse:
+    """Retired capability-bearing mutation path for pre-generation objects.
+
+    Legacy public links remain readable during their bounded TTL window, but
+    extending/updating them through a capability-bearing request path would
+    perpetuate that transport generation and create cross-deployment races.
+    Current clients must use ``POST /v1/share/update`` with ``shareId`` in the
+    bounded body; that route atomically upgrades the stored generation marker.
+    """
+    if not valid_share_id(share_id):
+        raise HTTPException(status_code=404, detail="Share not found or expired.")
+    entry = await _share_lookup_live(share_id)
+    _require_legacy_share_entry(entry)
+    logger.info(json.dumps({"event": "share.legacy_update_retired"}))
+    return JSONResponse(
+        {"error": "Legacy Share update path is retired. Use POST /v1/share/update."},
+        status_code=410,
+        headers={"Cache-Control": "no-store", **_legacy_share_headers(entry)},
+    )
+
+
+@app.delete("/v1/share/{share_id}")
+async def share_delete(share_id: str, request: Request) -> JSONResponse:
+    """Revoke a Global Share; public read capability alone is insufficient."""
+    if not valid_share_id(share_id):
+        raise HTTPException(status_code=404, detail="Share not found or expired.")
+    entry = await _share_lookup_live(share_id)
+    _require_legacy_share_entry(entry)
+    edit_token = request.headers.get("x-share-edit-token", "")
+    if not verify_edit_token(edit_token, entry.get("edit_hash", "")):
+        logger.warning(json.dumps({"event": "share.edit_auth_fail"}))
+        raise HTTPException(status_code=403, detail="Invalid share edit capability.")
+    try:
+        await _SHARE_STORE.delete_authorized(share_id, hash_edit_token(edit_token))
+    except ShareStoreError as exc:
+        raise _share_store_http_error(exc) from exc
+    logger.info(json.dumps({"event": "share.revoke", "legacy_transport": True}))
+    return JSONResponse(
+        {"revoked": True},
+        headers={"Cache-Control": "no-store", **_legacy_share_headers(entry)},
+    )
+
+
+def _feedback_review_enabled() -> bool:
+    return FEEDBACK_REVIEW_MODE == "provider-pr"
+
+
+def _feedback_review_pipeline_ready() -> bool:
+    if not _feedback_review_enabled():
+        return False
+    if _FEEDBACK_REVIEW_LEDGER_CONFIG_ERROR or not _FEEDBACK_REVIEW_LEDGER_READY:
+        return False
+    manifest = _FEEDBACK_REVIEW_LEDGER.manifest()
+    if FEEDBACK_REVIEW_REQUIRE_DURABLE and not bool(manifest.get("durable")):
+        return False
+    if FEEDBACK_REVIEW_REQUIRE_SHARED and not (
+        bool(manifest.get("shared")) and bool(manifest.get("authoritative"))
+    ):
+        return False
+    return _STORAGE.primary is not None and _STORAGE.primary_ready()
+
+
+def _is_above_thr(
+    label: str,
+    thr: int = 64,
+) -> bool:
+    return len(label) > thr
+
+
+def _validate_feedback_review_payload(  # ruff: ignore[too-many-branches]
+    payload: Any,
+) -> dict[str, Any]:
+    """Validate explicit one-Q&A maintainer feedback without silent truncation."""
+    if not isinstance(payload, dict):
+        raise HTTPException(
+            status_code=422, detail="Feedback review body must be an object."
+        )
+    if payload.get("schemaVersion") != 1:
+        raise HTTPException(
+            status_code=422, detail="Unsupported feedback review schemaVersion."
+        )
+    if (
+        payload.get("consentFlag") is not True
+        or payload.get("consentVersion") != FEEDBACK_REVIEW_CONSENT_VERSION
+    ):
+        raise HTTPException(
+            status_code=403, detail="Explicit feedback review permission is required."
+        )
+    if (
+        payload.get("trainingConsentFlag") is not True
+        or payload.get("trainingConsentVersion") != FEEDBACK_TRAINING_CONSENT_VERSION
+    ):
+        raise HTTPException(
+            status_code=403, detail="Explicit feedback training permission is required."
+        )
+    _validate_feedback_lineage_fields(payload, label="feedbackReview")
+    query = payload.get("query")
+    answer = payload.get("answer")
+    message = payload.get("message", "")
+    model = payload.get("model")
+    if not isinstance(model, dict):
+        raise HTTPException(
+            status_code=422,
+            detail="Feedback review requires originating model attribution.",
+        )
+    model_provider = model.get("provider")
+    model_name = model.get("model")
+    if (
+        not isinstance(model_provider, str)
+        or not model_provider.strip()
+        or _is_above_thr(model_provider, 128)
+        or not isinstance(model_name, str)
+        or not model_name.strip()
+        or _is_above_thr(model_name, 512)
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail="Feedback review originating model attribution is invalid.",
+        )
+    if not isinstance(query, str) or not query.strip():
+        raise HTTPException(
+            status_code=422, detail="Feedback review requires the question text."
+        )
+    if not isinstance(answer, str) or not answer.strip():
+        raise HTTPException(
+            status_code=422, detail="Feedback review requires the answer text."
+        )
+    if (
+        len(query) > MAX_CONVERSATION_MESSAGE_CHARS
+        or len(answer) > MAX_CONVERSATION_MESSAGE_CHARS
+    ):
+        raise HTTPException(
+            status_code=422, detail="Feedback review Q&A exceeds the supported size."
+        )
+    if not isinstance(message, str) or len(message) > MAX_CONTRIBUTION_NOTE_CHARS:
+        raise HTTPException(
+            status_code=422, detail="Feedback review note exceeds the supported size."
+        )
+    value = payload.get("ratingValue")
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise HTTPException(
+            status_code=422, detail="Feedback review requires a numeric rating."
+        )
+    scale_min = payload.get("ratingScaleMin")
+    scale_max = payload.get("ratingScaleMax")
+    if (
+        not isinstance(scale_min, (int, float))
+        or isinstance(scale_min, bool)
+        or not isinstance(scale_max, (int, float))
+        or isinstance(scale_max, bool)
+        or scale_min >= scale_max
+        or value < scale_min
+        or value > scale_max
+    ):
+        raise HTTPException(
+            status_code=422, detail="Feedback review rating scale is invalid."
+        )
+    mode = payload.get("ratingMode")
+    if mode not in {"quick", "panel"}:
+        raise HTTPException(
+            status_code=422, detail="Feedback review ratingMode must be quick or panel."
+        )
+    label = payload.get("ratingLabel")
+    title = payload.get("ratingTitle")
+
+    if label is not None and (not isinstance(label, str) or _is_above_thr(label, 64)):
+        raise HTTPException(
+            status_code=422, detail="Feedback review ratingLabel is invalid."
+        )
+    if title is not None and (not isinstance(title, str) or _is_above_thr(title, 128)):
+        raise HTTPException(
+            status_code=422, detail="Feedback review ratingTitle is invalid."
+        )
+
+    # The feedback-review contract requires model attribution, not the model's
+    # transport configuration.  Canonicalize to the minimum attribution shape
+    # so custom endpoint URLs, provider descriptions, or auxiliary links cannot
+    # become an accidental content-exfiltration channel.  This also makes the
+    # browser JSON tab and the cloud JSONL projection deterministic.
+    clean = dict(payload)
+    clean["model"] = {
+        "id": str(model.get("id") or "")[:256] or None,
+        "provider": str(model_provider).strip(),
+        "model": str(model_name).strip(),
+    }
+    page = payload.get("page", "")
+    if page is not None and not isinstance(page, str):
+        raise HTTPException(status_code=422, detail="Feedback review page is invalid.")
+    clean["page"] = sanitize_share_page_url(page or "")
+    return clean
+
+
+def _feedback_review_reference(
+    entry: dict[str, Any], review: Any | None = None
+) -> dict[str, Any]:
+    storage = entry.get("storage") if isinstance(entry.get("storage"), dict) else {}
+    raw_review = (
+        storage.get("review") if isinstance(storage.get("review"), dict) else {}
+    )
+    paths = storage.get("paths") if isinstance(storage.get("paths"), dict) else {}
+    provider = str(getattr(review, "provider", "") or raw_review.get("provider") or "")[
+        :32
+    ]
+    review_id = str(
+        getattr(review, "review_id", "") or raw_review.get("reviewId") or ""
+    )[:32]
+    path = str(getattr(review, "path", "") or "")
+    if not path:
+        target_id = str(raw_review.get("targetId") or "")
+        if target_id and target_id in paths:
+            path = str(paths.get(target_id) or "")
+        elif len(paths) == 1:
+            path = str(next(iter(paths.values())) or "")
+    path = path.replace("\\", "/").replace("\r", "").replace("\n", "")[:512]
+    if not path or path.startswith("/") or ".." in path.split("/"):
+        path = ""
+    out: dict[str, Any] = {}
+    if provider:
+        out["reviewProvider"] = provider
+    if review_id.isdigit():
+        out["reviewId"] = review_id
+    if path:
+        out["reviewPath"] = path
+    return out
+
+
+def _feedback_review_public_status(
+    entry: dict[str, Any], review: Any | None = None
+) -> dict[str, Any]:
+    state = str(entry.get("state") or "unknown")
+    review_state = str(getattr(review, "status", "") or "").lower()
+    if state == "eligible":
+        status = "reviewed"
+    elif state == "withdrawn":
+        status = "withdrawn"
+    elif state in {"deleted", "expired"}:
+        status = state
+    elif review_state in {"closed", "rejected"}:
+        status = "rejected"
+    else:
+        status = "in_review"
+    body = {
+        "status": status,
+        "reviewMode": FEEDBACK_REVIEW_MODE,
+        "trainingEligible": state == "eligible",
+        "feedbackReview": True,
+        "reviewRevision": max(
+            1, int((entry.get("operation") or {}).get("reviewRevision") or 1)
+        ),
+        "expiresAt": (
+            int(float(entry.get("expiresAt") or 0) * 1000)
+            if entry.get("expiresAt")
+            else None
+        ),
+    }
+    if review is not None:
+        body["reviewStatus"] = review.status
+    body.update(_feedback_review_reference(entry, review))
+    return body
+
+
+def _feedback_review_response(
+    entry: dict[str, Any],
+    *,
+    receipt_id: str,
+    delete_token: str,
+    review: Any | None,
+    replay: bool = False,
+    review_update: str = "",
+) -> JSONResponse:
+    body = {
+        "accepted": True,
+        "receiptId": receipt_id,
+        "idempotentReplay": bool(replay),
+        **_feedback_review_public_status(entry, review),
+    }
+    if review_update:
+        body["reviewUpdate"] = review_update
+    if delete_token:
+        body["deleteToken"] = delete_token
+    return JSONResponse(body, headers={"Cache-Control": "no-store"})
+
+
+async def _authorized_feedback_review_entry(
+    receipt_id: str, request: Request
+) -> dict[str, Any]:
+    try:
+        entry = await _FEEDBACK_REVIEW_LEDGER.get(receipt_id)
+    except ContributionLedgerError as exc:
+        raise _contribution_ledger_http_error(exc) from exc
+    if entry is None:
+        raise HTTPException(
+            status_code=404, detail="Feedback review receipt not found."
+        )
+    supplied = request.headers.get("X-Feedback-Review-Token", "")
+    if not supplied or not verify_edit_token(
+        supplied, str(entry.get("deleteTokenHash") or "")
+    ):
+        raise HTTPException(
+            status_code=403, detail="Invalid feedback review management capability."
+        )
+    return entry
+
+
+async def _ensure_feedback_provider_review(entry: dict[str, Any]):
+    if not _feedback_review_enabled():
+        return None
+    receipt_id = str(entry.get("receiptId") or "")
+    storage_hint = (
+        entry.get("storage") if isinstance(entry.get("storage"), dict) else {}
+    )
+    if isinstance(storage_hint.get("review"), dict):
+        review = await _STORAGE.get_feedback_review(
+            receipt_id, review_hint=storage_hint
+        )
+        if review is None:
+            raise StorageWriteError("REVIEW_NOT_FOUND")
+        return review
+    records = [row for row in entry.get("records", []) if isinstance(row, dict)]
+    if not records:
+        raise StorageWriteError("EMPTY_REVIEW")
+    content = ("\n".join(json.dumps(r, ensure_ascii=False) for r in records)).encode(
+        "utf-8"
+    )
+    review = await _STORAGE.open_feedback_review(
+        receipt_id=receipt_id,
+        content=content,
+        commit_message="Open maintainer feedback review · revision 1",
+        path_timestamp=float(entry.get("receivedAt") or _time.time()),
+    )
+    try:
+        bound = await _FEEDBACK_REVIEW_LEDGER.set_pending_storage(
+            receipt_id, storage=review.storage_metadata()
+        )
+        entry["storage"] = bound.get("storage") or review.storage_metadata()
+    except ContributionLedgerError as exc:
+        raise StorageWriteError("REVIEW_BIND_LEDGER", transient=True) from exc
+    return review
+
+
+async def _sync_feedback_review_merge(
+    entry: dict[str, Any],
+) -> tuple[dict[str, Any], Any | None]:
+    if not _feedback_review_enabled() or str(entry.get("state") or "") != "quarantined":
+        return entry, None
+    review = await _ensure_feedback_provider_review(entry)
+    if review is None or review.status != "merged":
+        return entry, review
+    try:
+        claimed = await _FEEDBACK_REVIEW_LEDGER.begin_promotion(
+            str(entry.get("receiptId") or "")
+        )
+        claim = str(claimed.get("operationClaim") or "") or None
+        reviewed = await _FEEDBACK_REVIEW_LEDGER.mark_promoted(
+            str(entry.get("receiptId") or ""),
+            storage=review.storage_metadata(),
+            claim_token=claim,
+        )
+        logger.info(
+            json.dumps({"event": "feedback_review.merged", "provider": review.provider})
+        )
+        return reviewed, review
+    except ContributionLedgerError:
+        current = await _FEEDBACK_REVIEW_LEDGER.get(str(entry.get("receiptId") or ""))
+        if current is not None and str(current.get("state") or "") == "eligible":
+            return current, review
+        raise
+
+
+@app.post("/v1/feedback/review")
+async def create_feedback_review(request: Request) -> JSONResponse:
+    """Create one explicit content-bearing maintainer feedback review."""
+    if not _feedback_review_pipeline_ready():
+        raise HTTPException(
+            status_code=503, detail="Feedback review workflow is unavailable."
+        )
+    raw = await _read_limited_body(
+        request, FEEDBACK_REVIEW_MAX_BODY_BYTES, "Feedback review"
+    )
+    try:
+        payload = _validate_feedback_review_payload(json.loads(raw))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+    envelope = _operation_envelope(
+        request,
+        payload,
+        "feedback-review",
+        max_age_ms=FEEDBACK_REVIEW_TTL_SECONDS * 1000,
+    )
+    if envelope:
+        receipt_id, delete_hash, operation_id = envelope
+        delete_token = ""
+    else:
+        receipt_id, delete_token, operation_id = (
+            uuid.uuid4().hex,
+            generate_edit_token(),
+            "",
+        )
+        delete_hash = hash_edit_token(delete_token)
+    payload_digest = _canonical_payload_digest(payload)
+
+    if envelope:
+        try:
+            existing = await _FEEDBACK_REVIEW_LEDGER.get(receipt_id)
+        except ContributionLedgerError as exc:
+            raise _contribution_ledger_http_error(exc) from exc
+        if existing is not None:
+            op = (
+                existing.get("operation")
+                if isinstance(existing.get("operation"), dict)
+                else {}
+            )
+            if not (
+                secrets.compare_digest(
+                    str(op.get("payloadDigest") or ""), payload_digest
+                )
+                and secrets.compare_digest(
+                    str(op.get("operationId") or ""), operation_id
+                )
+                and secrets.compare_digest(
+                    str(existing.get("deleteTokenHash") or ""), delete_hash
+                )
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="Feedback review operation identity was reused with different content.",
+                )
+            review = await _ensure_feedback_provider_review(existing)
+            return _feedback_review_response(
+                existing,
+                receipt_id=receipt_id,
+                delete_token=delete_token,
+                review=review,
+                replay=True,
+                review_update="unchanged",
+            )
+
+    client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _feedback_review_rl,
+        _feedback_review_rl_lock,
+        client_ip,
+        limit=FEEDBACK_REVIEW_RATE_LIMIT_PER_HOUR,
+        scope="feedback-review",
+    )
+    if not allowed:
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for feedback reviews.",
+            headers={"Retry-After": "3600"},
+        )
+
+    server_ts_ms = int(_time.time() * 1000)
+    record = normalize_feedback_review_record(
+        payload, server_ts_ms=server_ts_ms, receipt_id=receipt_id
+    )
+    encoded = json.dumps(record, ensure_ascii=False).encode("utf-8")
+    entry = {
+        "receiptId": receipt_id,
+        "kind": "feedback-review",
+        "state": "quarantined",
+        "records": [record],
+        "bytes": len(encoded),
+        "deleteTokenHash": delete_hash,
+        "expiresAt": _time.time() + FEEDBACK_REVIEW_TTL_SECONDS,
+        "receivedAt": _time.time(),
+        "dedupKeys": [str(record.get("_dedup_key") or "")],
+        "storage": {},
+        "withdrawalStorage": {},
+        "currentViewRemoval": {},
+        "lastError": "",
+        "operation": {
+            "payloadDigest": payload_digest,
+            "operationId": operation_id,
+            "reviewRevision": 1,
+        },
+        "rowCount": 1,
+    }
+    try:
+        await _FEEDBACK_REVIEW_LEDGER.create(entry)
+    except ContributionLedgerError as exc:
+        raise _contribution_ledger_http_error(exc) from exc
+    try:
+        review = await _ensure_feedback_provider_review(entry)
+    except StorageWriteError as exc:
+        logger.error(
+            json.dumps({"event": "feedback_review.open_fail", "code": exc.code})
+        )
+        raise HTTPException(
+            status_code=503,
+            detail="Feedback was accepted into review lifecycle but its repository review could not be opened. Retry the same action.",
+        ) from exc
+    logger.info(
+        json.dumps({"event": "feedback_review.opened", "provider": review.provider})
+    )
+    return _feedback_review_response(
+        entry, receipt_id=receipt_id, delete_token=delete_token, review=review
+    )
+
+
+@app.put("/v1/feedback/review/{receipt_id}")
+async def update_feedback_review(receipt_id: str, request: Request) -> JSONResponse:
+    """Update one open feedback review; identical content is a no-op."""
+    entry = await _authorized_feedback_review_entry(receipt_id, request)
+    if str(entry.get("state") or "") == "quarantined":
+        try:
+            entry, current_review = await _sync_feedback_review_merge(entry)
+        except (StorageWriteError, ContributionLedgerError) as exc:
+            raise HTTPException(
+                status_code=503, detail="Feedback review state could not be refreshed."
+            ) from exc
+    else:
+        current_review = None
+    if str(entry.get("state") or "") != "quarantined":
+        raise HTTPException(
+            status_code=409, detail="Feedback review is no longer open for updates."
+        )
+    if current_review is not None and current_review.status in {"closed", "rejected"}:
+        raise HTTPException(
+            status_code=409, detail="Feedback review was closed and cannot be updated."
+        )
+    raw = await _read_limited_body(
+        request, FEEDBACK_REVIEW_MAX_BODY_BYTES, "Feedback review"
+    )
+    try:
+        payload = _validate_feedback_review_payload(json.loads(raw))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body.") from exc
+    digest = _canonical_payload_digest(payload)
+    operation = (
+        entry.get("operation") if isinstance(entry.get("operation"), dict) else {}
+    )
+    if str(operation.get("payloadDigest") or "") and secrets.compare_digest(
+        str(operation.get("payloadDigest") or ""), digest
+    ):
+        review = current_review or await _ensure_feedback_provider_review(entry)
+        return _feedback_review_response(
+            entry,
+            receipt_id=receipt_id,
+            delete_token="",
+            review=review,
+            replay=True,
+            review_update="unchanged",
+        )
+    record = normalize_feedback_review_record(
+        payload, server_ts_ms=int(_time.time() * 1000), receipt_id=receipt_id
+    )
+    encoded = json.dumps(record, ensure_ascii=False).encode("utf-8")
+    next_revision = max(1, int(operation.get("reviewRevision") or 1)) + 1
+    try:
+        review = await _STORAGE.update_feedback_review(
+            receipt_id=receipt_id,
+            content=encoded,
+            commit_message=f"Update maintainer feedback review · revision {next_revision}",
+            path_timestamp=float(entry.get("receivedAt") or _time.time()),
+            review_hint=(
+                entry.get("storage") if isinstance(entry.get("storage"), dict) else None
+            ),
+        )
+    except StorageWriteError as exc:
+        if exc.code in {"REVIEW_CLOSED", "REVIEW_MERGED", "REVIEW_NOT_FOUND"}:
+            raise HTTPException(
+                status_code=409, detail="Feedback review is no longer open for updates."
+            ) from exc
+        raise HTTPException(
+            status_code=503, detail="Feedback review could not be updated safely."
+        ) from exc
+    try:
+        updated = await _FEEDBACK_REVIEW_LEDGER.replace_pending_payload(
+            receipt_id,
+            records=[record],
+            byte_count=len(encoded),
+            dedup_keys=[str(record.get("_dedup_key") or "")],
+            payload_digest=digest,
+            row_count=1,
+            storage=review.storage_metadata(),
+        )
+    except ContributionLedgerError as exc:
+        raise _contribution_ledger_http_error(exc) from exc
+    logger.info(
+        json.dumps(
+            {
+                "event": "feedback_review.updated",
+                "revision": next_revision,
+                "provider": review.provider,
+            }
+        )
+    )
+    return _feedback_review_response(
+        updated,
+        receipt_id=receipt_id,
+        delete_token="",
+        review=review,
+        review_update="updated",
+    )
+
+
+@app.get("/v1/feedback/review/{receipt_id}")
+async def feedback_review_status(  # ruff: ignore[undocumented-public-function]
+    receipt_id: str,
+    request: Request,
+) -> JSONResponse:
+    entry = await _authorized_feedback_review_entry(receipt_id, request)
+    review = None
+    if str(entry.get("state") or "") == "quarantined" and _feedback_review_enabled():
+        try:
+            entry, review = await _sync_feedback_review_merge(entry)
+        except (StorageWriteError, ContributionLedgerError) as exc:
+            logger.warning(
+                json.dumps(
+                    {
+                        "event": "feedback_review.status_fail",
+                        "error_type": type(exc).__name__,
+                    }
+                )
+            )
+    return JSONResponse(
+        _feedback_review_public_status(entry, review),
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+@app.delete("/v1/feedback/review/{receipt_id}")
+async def withdraw_feedback_review(receipt_id: str, request: Request) -> JSONResponse:
+    """Withdraw pending or merged maintainer feedback using participant authority."""
+    entry = await _authorized_feedback_review_entry(receipt_id, request)
+    state = str(entry.get("state") or "")
+    if state == "quarantined":
+        try:
+            entry, review = await _sync_feedback_review_merge(entry)
+            state = str(entry.get("state") or "")
+        except (StorageWriteError, ContributionLedgerError) as exc:
+            raise HTTPException(
+                status_code=503, detail="Feedback review state could not be refreshed."
+            ) from exc
+        if state == "quarantined":
+            if review is not None and review.status not in {"closed", "rejected"}:
+                try:
+                    await _STORAGE.close_feedback_review(
+                        receipt_id,
+                        review_hint=(
+                            entry.get("storage")
+                            if isinstance(entry.get("storage"), dict)
+                            else None
+                        ),
+                    )
+                except StorageWriteError as exc:
+                    raise HTTPException(
+                        status_code=503,
+                        detail="Feedback review could not be closed safely.",
+                    ) from exc
+            try:
+                deleted = await _FEEDBACK_REVIEW_LEDGER.delete_pending(receipt_id)
+            except ContributionLedgerError as exc:
+                raise _contribution_ledger_http_error(exc) from exc
+            logger.info(json.dumps({"event": "feedback_review.withdrawn_pending"}))
+            body = _feedback_review_public_status(deleted, review)
+            body["status"] = "withdrawn"
+            return JSONResponse(body, headers={"Cache-Control": "no-store"})
+    if state in {"deleted", "withdrawn"}:
+        body = _feedback_review_public_status(entry, None)
+        body["status"] = "withdrawn"
+        return JSONResponse(body, headers={"Cache-Control": "no-store"})
+    if state == "expired":
+        raise HTTPException(status_code=410, detail="Feedback review receipt expired.")
+    if state not in {"eligible", "promotion_uncertain", "withdrawal_uncertain"}:
+        raise HTTPException(
+            status_code=409,
+            detail="Feedback review cannot be withdrawn in its current state.",
+        )
+    try:
+        claimed = await _FEEDBACK_REVIEW_LEDGER.begin_withdrawal(receipt_id)
+        claim = str(claimed.get("operationClaim") or "") or None
+    except ContributionLedgerError as exc:
+        raise _contribution_ledger_http_error(exc) from exc
+    storage = claimed.get("storage") if isinstance(claimed.get("storage"), dict) else {}
+    removal = await _STORAGE.remove_current_view(
+        dict(storage.get("paths") or {}),
+        record_id=str(storage.get("recordId") or "") or None,
+    )
+    try:
+        withdrawn = await _FEEDBACK_REVIEW_LEDGER.mark_withdrawn(
+            receipt_id,
+            withdrawal_storage={},
+            current_view_removal=removal,
+            claim_token=claim,
+        )
+    except ContributionLedgerError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Feedback removal completed but lifecycle confirmation failed.",
+        ) from exc
+    logger.info(json.dumps({"event": "feedback_review.withdrawn_reviewed"}))
+    body = _feedback_review_public_status(withdrawn, None)
+    body["status"] = "withdrawn"
+    body["currentViewRemoval"] = removal
+    return JSONResponse(body, status_code=202, headers={"Cache-Control": "no-store"})
 
 
 @app.post("/v1/feedback")
 async def feedback(request: Request) -> JSONResponse:
-    """Accept a thumbs-up/down feedback record from the AI assistant widget.
+    """Accept privacy-minimal rating telemetry.
 
-    Parameters
-    ----------
-    request : fastapi.Request
-        HTTP request.  Body must be valid JSON; all fields are optional.
-        Typical payload fields from the JS widget:
-
-        * ``ratingValue``  — ``"thumbs-up"`` or ``"thumbs-down"``
-        * ``ratingLabel``  — human-readable label (e.g. ``"Helpful"``)
-        * ``message``      — optional free-text comment from the user
-        * ``query``        — the question that was asked
-        * ``answer``       — the response that was rated
-        * ``model``        — model ID that produced the answer
-        * ``sessionId``    — browser session UUID
-        * ``page``         — originating documentation page URL
-        * ``ts``           — client-side timestamp (ms since epoch)
-
-    Returns
-    -------
-    fastapi.responses.JSONResponse
-        ``{"ok": true}`` on success.
-
-    Raises
-    ------
-    fastapi.HTTPException
-        400 when the body is not valid JSON.
-        413 when the body exceeds :data:`~_shared_logic.DEFAULT_MAX_BODY_BYTES`.
-        429 when the IP rate limit (30/hour) is exceeded.
-
-    Notes
-    -----
-    **User note** — When ``FEEDBACK_PERSIST_ENABLED`` is ``false`` (the
-    default), feedback is logged to the Space log stream only and is NOT
-    stored in the dataset.  To enable dataset persistence set the environment
-    variable ``FEEDBACK_PERSIST_ENABLED=true`` together with
-    ``TRAINING_DATASET_REPO`` and ``HF_WRITE_TOKEN`` (or ``HF_TOKEN``).
-    Persisted records are written to ``feedback/{timestamp}.jsonl`` in the
-    dataset repo.  See ``DATASET_COLLECTION_GUIDANCE.md`` for the full
-    data-collection contract and the canonical dedup procedure that eliminates
-    cross-source duplicates before training.
-
-    **Developer note** — The JS widget sends feedback with ``keepalive: true``
-    so the request survives page unload.  The handler therefore needs no
-    response body beyond ``{"ok": true}``; the widget does not read it.
-
-    **Developer note** — Rate limit (30/hour per IP) is set high because
-    users commonly rate multiple answers in a session.  The limit prevents
-    programmatic flooding while allowing normal interactive use.
-
-    **Developer note** — Deduplication contract: every persisted feedback record
-    carries ``_source="feedback"`` and ``_dedup_key="{conversationId}:{answerIndex}"``.
-    The ``conversationId`` is the stable per-page-load session UUID that the JS
-    widget adds as ``detail.conversationId`` (distinct from the per-click
-    ``detail.sessionId`` idempotency key).  Contribution records (from
-    ``POST /v1/contribute``) carry the same ``_dedup_key`` format so that a
-    simple equality comparison across both ``feedback/`` and ``contributions/``
-    folders identifies cross-source duplicates.  Priority rule: when both sources
-    carry the same ``_dedup_key``, keep the ``contribution`` record and discard
-    the ``feedback`` record — the GDPR-gated explicit contribution is the
-    higher-quality signal.
+    Every request must carry the current explicit telemetry-consent marker.
+    Direct callers may still submit query, answer, comment, model, page or
+    conversation identifiers, but the server normalizer discards them before
+    optional persistence. Persistence is server opt-in
+    (``FEEDBACK_PERSIST_ENABLED=false`` by default) and persisted rows are
+    ``trainingStatus=telemetry`` so the training builder excludes them.
     """
-    # Body size guard
-    raw = await request.body()
-    if len(raw) > DEFAULT_MAX_BODY_BYTES:
-        raise HTTPException(status_code=413, detail="Payload too large.")
+    # Body size guard — enforced while streaming, before full allocation.
+    raw = await _read_limited_body(request, FEEDBACK_MAX_BODY_BYTES, "Feedback")
 
     try:
         payload = json.loads(raw)
@@ -1766,147 +7632,105 @@ async def feedback(request: Request) -> JSONResponse:
             status_code=422, detail="Feedback body must be a JSON object."
         )
 
+    # Network feedback is user-consented telemetry, not an implicit side effect
+    # of clicking a local rating button. Reject legacy/misbehaving clients that
+    # do not carry the current explicit consent marker. This check occurs before
+    # rate-limit/storage work so denied telemetry consumes minimal server state.
+    if (
+        payload.get("telemetryConsent") is not True
+        or payload.get("telemetryConsentVersion") != FEEDBACK_TELEMETRY_CONSENT_VERSION
+    ):
+        logger.warning(json.dumps({"event": "feedback.consent_required"}))
+        raise HTTPException(
+            status_code=403,
+            detail="Explicit feedback telemetry permission is required.",
+        )
+    if payload.get("schemaVersion") != FEEDBACK_TELEMETRY_SCHEMA_VERSION:
+        raise HTTPException(
+            status_code=422, detail="Unsupported feedback telemetry schema version."
+        )
+    consent_at = payload.get("telemetryConsentAt")
+    if (
+        not isinstance(consent_at, (int, float))
+        or isinstance(consent_at, bool)
+        or consent_at <= 0
+    ):
+        raise HTTPException(
+            status_code=422, detail="Feedback telemetry consent timestamp is required."
+        )
+
+    _validate_feedback_lineage_fields(payload, label="feedbackTelemetry")
+
     # ── Distinguish retraction tombstones from regular ratings ───────────────
     # Retractions are system-generated housekeeping records that invalidate a
-    # previous rating in the training dataset.  They carry action="retract" and
-    # prevSessionId (pointing to the original record) but NO ratingValue.
+    # previous rating in the training dataset. They carry action="retract" and
+    # canonical prevFeedbackId (pointing to the original record) but NO ratingValue.
     # Key behavioural differences vs regular feedback:
-    #   1. NOT counted against the per-IP rate limit — a user who edits 10
-    #      answers would otherwise exhaust their 30-slot hourly budget on cleanup
-    #      records alone (10 originals + 10 retractions + 10 new ratings = 30).
-    #   2. Validated differently — prevSessionId is required; ratingValue is absent.
+    #   1. Counted against the same bounded abuse gate as every feedback write;
+    #      retractions must not create an unlimited write path.
+    #   2. Validated differently — prevFeedbackId is required; ratingValue is absent.
     #   3. Logged with event "feedback.retract" so operators can distinguish
     #      retraction volume from new-rating volume in log dashboards.
     #   4. Committed with a distinct commit_message so the HF repo history is legible.
     is_retract: bool = payload.get("action") == "retract"
 
     client_ip = _client_ip(request)
+    allowed, _count = await _consume_rate_limit(
+        _feedback_rl,
+        _feedback_rl_lock,
+        client_ip,
+        limit=FEEDBACK_RATE_LIMIT_PER_HOUR,
+        scope="feedback",
+    )
+    if not allowed:
+        logger.warning(
+            json.dumps({"event": "feedback.ratelimit", "ip": _mask_ip(client_ip)})
+        )
+        raise HTTPException(
+            status_code=429,
+            detail="Rate limit exceeded for feedback submissions.",
+            headers={"Retry-After": "3600"},
+        )
 
     if is_retract:
-        # Validate required retraction fields before touching any rate-limit state.
-        if not payload.get("prevSessionId"):
+        if not payload.get("prevFeedbackId"):
             raise HTTPException(
                 status_code=422,
-                detail="Retraction records must include a non-empty prevSessionId.",
+                detail="Retraction records must include a non-empty prevFeedbackId.",
             )
         logger.info(
             json.dumps(
-                {
-                    "event": "feedback.retract",
-                    "ip": _mask_ip(client_ip),
-                    "prevSessionId": payload.get("prevSessionId"),
-                    "conversationId": payload.get("conversationId"),
-                    "answerIndex": payload.get("answerIndex"),
-                    "ts": payload.get("ts"),
-                    "persist": FEEDBACK_PERSIST_ENABLED,
-                }
+                {"event": "feedback.retract", "persist": FEEDBACK_PERSIST_ENABLED}
             )
         )
     else:
-        # ── Per-IP rate limit: 30 regular ratings per hour ───────────────────
-        # Retractions are exempt (see above).  The limit guards against
-        # programmatic flooding; normal interactive use stays well under it.
-        async with _feedback_rl_lock:
-            now = _time.time()
-            # Sweep expired entries to bound memory under a unique-IP flood.
-            # _MAX_RL_ENTRIES is the safety ceiling declared at module level.
-            if len(_feedback_rl) >= _MAX_RL_ENTRIES:
-                cutoff = now - 3600
-                expired = [k for k, (_, ws) in _feedback_rl.items() if ws < cutoff]
-                for k in expired:
-                    del _feedback_rl[k]
-            count, window_start = _feedback_rl.get(client_ip, (0, now))
-            if now - window_start > 3600:  # noqa: PLR2004
-                count, window_start = 0, now
-            count += 1
-            _feedback_rl[client_ip] = (count, window_start)
-            if count > 30:  # noqa: PLR2004
-                logger.warning(
-                    json.dumps(
-                        {"event": "feedback.ratelimit", "ip": _mask_ip(client_ip)}
-                    )
-                )
-                raise HTTPException(
-                    status_code=429,
-                    detail="Rate limit exceeded. Maximum 30 feedback submissions per hour.",
-                    headers={"Retry-After": "3600"},
-                )
-
         logger.info(
             json.dumps(
-                {
-                    "event": "feedback.receive",
-                    "ip": _mask_ip(client_ip),
-                    "ratingValue": payload.get("ratingValue"),
-                    "model": payload.get("model"),
-                    "conversationId": payload.get("conversationId"),
-                    "answerIndex": payload.get("answerIndex"),
-                    "page": payload.get("page"),
-                    "ts": payload.get("ts"),
-                    "persist": FEEDBACK_PERSIST_ENABLED,
-                }
+                {"event": "feedback.receive", "persist": FEEDBACK_PERSIST_ENABLED}
             )
         )
 
-    # ── Optional HF dataset persistence ─────────────────────────────────────
-    # Activated only when FEEDBACK_PERSIST_ENABLED=true AND the dataset repo
-    # and write token are both configured.  Failures are logged and swallowed
+    # ── Optional provider-neutral record persistence ─────────────────────────
+    # Activated only when FEEDBACK_PERSIST_ENABLED=true and a primary storage
+    # target is configured. Failures are logged and swallowed
     # so that a dataset-write error never breaks the user's rating experience
     # (the keepalive fire-and-forget model means the user won't see a retry UI
     # anyway).  Operators should monitor "feedback.persist_fail" log events.
     #
-    # Retraction records ARE persisted (when persistence is enabled) because
-    # the training pipeline needs to see them to suppress the original rating.
-    # A retraction that arrives without persistence is a no-op — the original
-    # rating also wasn't persisted, so there is nothing to suppress.
-    if FEEDBACK_PERSIST_ENABLED and TRAINING_DATASET_REPO and HF_DATASET_TOKEN:
+    # Persisted feedback remains telemetry-only and is excluded from training.
+    if FEEDBACK_PERSIST_ENABLED and _STORAGE.primary is not None:
         try:
-            from huggingface_hub import CommitOperationAdd, HfApi  # noqa: PLC0415
-
-            # ``conversationId`` is the stable per-page-load session UUID that
-            # the JS widget sets as ``detail.conversationId = _sessionId``.
-            # It is *different* from ``detail.sessionId`` which is a per-click
-            # idempotency key.  We need ``conversationId`` here because the
-            # contribution endpoint uses ``payload.sessionId`` (= _sessionId)
-            # as the first component of the dedup key.
-            # normalize_feedback_record uses payload.get("conversationId") and
-            # payload.get("answerIndex") internally to build the canonical record.
-            # The variables below are derived from the serialised record so the
-            # log event and filename are always consistent with what is stored.
-
-            # normalize_feedback_record whitelists only known fields (discards
-            # arbitrary client-supplied extras and the legacy ``rating`` alias),
-            # normalises ratingLabel to a canonical slug, expands the model object
-            # to the full 8-key shape, renames sessionId → feedbackId and
-            # prevSessionId → prevFeedbackId, and enforces canonical key order.
-            # The resulting record is structurally identical to a contribution row
-            # so both sources concatenate directly into one pandas DataFrame.
-            # See _dataset_schema.py for the full canonical column list.
             _rec_dict: dict = normalize_feedback_record(
                 payload,
                 server_ts_ms=int(_time.time() * 1000),
             )
             record: str = json.dumps(_rec_dict, ensure_ascii=False)
-            conversation_id: str = str(_rec_dict.get("conversationId") or "")
-            answer_index: Any = _rec_dict.get("answerIndex", "")
-            filename = f"feedback/{int(_time.time() * 1000)}.jsonl"
-            api = HfApi(token=HF_DATASET_TOKEN)
-            # Fix 3 (feedback): same event-loop fix as /v1/contribute — offload
-            # the synchronous HF HTTP call to a worker thread so the uvicorn
-            # loop stays unblocked during the HuggingFace round-trip.
             commit_msg = (
                 "Retract 1 feedback record" if is_retract else "Add 1 feedback record"
             )
-            await asyncio.to_thread(
-                api.create_commit,
-                repo_id=TRAINING_DATASET_REPO,
-                repo_type="dataset",
-                operations=[
-                    CommitOperationAdd(
-                        path_in_repo=filename,
-                        path_or_fileobj=record.encode(),
-                    )
-                ],
+            receipt = await _persist_storage_record(
+                kind="feedback",
+                content=record.encode("utf-8"),
                 commit_message=commit_msg,
             )
             logger.info(
@@ -1914,16 +7738,18 @@ async def feedback(request: Request) -> JSONResponse:
                     {
                         "event": "feedback.persist_ok",
                         "retract": is_retract,
-                        "dedup_key": f"{conversation_id}:{answer_index}",
-                        "ip": _mask_ip(client_ip),
+                        "mirror_count": len(receipt.mirrors),
+                        "mirror_degraded": sum(
+                            1 for _v in receipt.mirrors.values() if _v != "ok"
+                        ),
                     }
                 )
             )
-        except Exception as exc:  # noqa: BLE001
-            # Never propagate — the JS widget does not read the response body
-            # and the user's rating must always be acknowledged with 200.
+        except StorageWriteError as exc:
+            # Never propagate: rating UX remains successful even when storage is
+            # degraded. Log only the sanitized adapter code, never provider body.
             logger.error(
-                json.dumps({"event": "feedback.persist_fail", "error": str(exc)})
+                json.dumps({"event": "feedback.persist_fail", "code": exc.code})
             )
 
     return JSONResponse({"ok": True})

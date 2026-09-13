@@ -1,213 +1,115 @@
 {
- "schema_version": 1,
- "subsystem": "scikitplot._externals._sphinx_ext._sphinx_ai_assistant",
- "source_anchor": {
-  "archive": "scikit-plots(20260820-114035).zip",
-  "sha256": "15d914046eaa3059c16bde66eadcc41ebb3a6d824de36acb876e170925aa74cc",
-  "observed_date": "2026-08-20"
- },
- "physical": {
-  "baseline_files": [
-   {
-    "path": "__init__.py",
-    "lines": 5492,
-    "role": "sphinx extension/build/config/current representation"
-   },
-   {
-    "path": "_static/ai-assistant.js",
-    "lines": 22735,
-    "role": "browser runtime"
-   },
-   {
-    "path": "_static/ai-assistant.css",
-    "lines": 14300,
-    "role": "browser styles"
-   },
-   {
-    "path": "_hf_spaces_model/app.py",
-    "lines": 2446,
-    "role": "model service"
-   },
-   {
-    "path": "_hf_spaces_proxy/app.py",
-    "lines": 1929,
-    "role": "proxy API/routing"
-   },
-   {
-    "path": "_hf_spaces_proxy/_shared_logic.py",
-    "lines": 1454,
-    "role": "proxy shared logic"
-   },
-   {
-    "path": "_hf_spaces_proxy/_dataset_schema.py",
-    "lines": 1206,
-    "role": "dataset schema"
-   },
-   {
-    "path": "_cf_worker/index.js",
-    "lines": 499,
-    "role": "edge relay"
-   },
-   {
-    "path": "dev_proxy.py",
-    "lines": 362,
-    "role": "dev relay"
-   }
-  ],
-  "sphinx_config_value_calls": 90,
-  "forbidden_runtime_dependencies": [
-   "_maintenance",
-   "_static/_backup"
-  ],
-  "representation_producer": "self: __init__.py generate_markdown_files/generate_llms_txt at build-finished",
-  "frozen_siblings": [
-   "scikitplot._externals._sphinx_ext._sphinx_llm"
+  "schema_version": 2,
+  "subsystem": "scikitplot._externals._sphinx_ext._sphinx_ai_assistant",
+  "source_anchor": {
+    "archive": "scikitplot__sphinx_ai_assistant_run172(2).zip",
+    "sha256": "a009fd065aa151a167f7e3d43f254b084c62a0261079bd1c9ec0877ce99e5a06",
+    "kind": "local-debugging-workspace-input"
+  },
+  "release_anchor": {
+    "archive": "scikitplot__sphinx_ai_assistant_run172.zip",
+    "sha256": "0d7ff4b4ee9f8530d574b247f8135e6107dd01fd3d59c6c7724d192b9946aa00",
+    "patch_from_run171_sha256": "eac8ca450ac1fae581d29342877efdaade47668ac8a3f1f9812fbe9815235fb1",
+    "sha256sums_sha256": "82383e5c6fc421bcec2ee7a8f32991a403a7e1aedfc9aceddb9bbf2c024dd1e0",
+    "status": "FULLY_CLOSED_DEPLOYABLE"
+  },
+  "physical": {
+    "runtime_root": "scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant",
+    "maintenance_root": "maintenances/_externals/_sphinx_ext/_sphinx_ai_assistant",
+    "skill_root": "skills/_externals/_sphinx_ext/_sphinx_ai_assistant",
+    "runtime_root_markdown": [
+      "README.md",
+      "ISOLATION_DEPLOYMENT.md",
+      "ACTIVITY_AND_FILE_PREVIEW_GUIDE.md"
+    ],
+    "maintenance_tools": [
+      "maintenances/_externals/_sphinx_ext/_sphinx_ai_assistant/_maintenance/tools/check_trackers.py",
+      "maintenances/_externals/_sphinx_ext/_sphinx_ai_assistant/_maintenance/tools/dev_proxy.py"
+    ],
+    "maintenance_examples": [
+      "maintenances/_externals/_sphinx_ext/_sphinx_ai_assistant/_maintenance/examples/_example_conf_proxy.py"
+    ]
+  },
+  "logical_contracts": [
+    {
+      "id": "AIA-C001",
+      "name": "source-authority",
+      "owner": "maintenance",
+      "status": "ACTIVE",
+      "invariant": "Current user local files/logs outrank workspace, release, and historical anchors.",
+      "verification": "STATE.json + fresh-chat handoff."
+    },
+    {
+      "id": "AIA-C002",
+      "name": "browser-server-authority",
+      "owner": "runtime/proxy",
+      "status": "ACTIVE",
+      "invariant": "Browser is presentation; credentials, routing, persistence, and security policy remain server authoritative.",
+      "verification": "security/proxy regression suites."
+    },
+    {
+      "id": "AIA-C003",
+      "name": "canonical-representation",
+      "owner": "build layer",
+      "status": "ACTIVE",
+      "invariant": "Build-time page.md is canonical; browser conversion is convenience.",
+      "verification": "representation/conversion tests."
+    },
+    {
+      "id": "AIA-C004",
+      "name": "turn-owned-cancellation",
+      "owner": "browser runtime",
+      "status": "ACTIVE_RUN172",
+      "invariant": "Stopped or superseded turns cannot append late work, retry reasoning, create previews, or unlock newer UI.",
+      "verification": "Run 172 cancellation/broken-pipe tests."
+    },
+    {
+      "id": "AIA-C005",
+      "name": "latest-file-authority",
+      "owner": "browser runtime",
+      "status": "ACTIVE_RUN172",
+      "invariant": "Every generated-file link resolves the newest state; broken/unavailable newer revisions never reveal stale bytes.",
+      "verification": "Run 172 activity/latest-file tests."
+    },
+    {
+      "id": "AIA-C006",
+      "name": "conversation-generation-binding",
+      "owner": "browser runtime",
+      "status": "ACTIVE",
+      "invariant": "Async share/contribution results must remain bound to the conversation generation that initiated them.",
+      "verification": "share DOM race tests."
+    },
+    {
+      "id": "AIA-C007",
+      "name": "telemetry-consent",
+      "owner": "browser/proxy",
+      "status": "ACTIVE",
+      "invariant": "Local feedback works without network telemetry; network telemetry/contribution remains explicit-consent gated.",
+      "verification": "feedback telemetry/privacy suites."
+    },
+    {
+      "id": "AIA-C008",
+      "name": "hermetic-release-subprocesses",
+      "owner": "release security",
+      "status": "ACTIVE_RUN170",
+      "invariant": "Release-security subprocesses use constrained environments and do not inherit arbitrary secrets or Git authority.",
+      "verification": "Run 170 hermetic process tests."
+    },
+    {
+      "id": "AIA-C009",
+      "name": "maintenance-separation",
+      "owner": "maintenance",
+      "status": "ACTIVE",
+      "invariant": "Runtime never imports maintenance/skill planes; planning, history, dev-only tools, and backups stay outside runtime.",
+      "verification": "check_trackers.py + import/path grep."
+    },
+    {
+      "id": "AIA-C010",
+      "name": "test-first-repair",
+      "owner": "maintenance",
+      "status": "ACTIVE",
+      "invariant": "Local failures are classified and fixed narrowly before broad reruns or new feature work.",
+      "verification": "DEBUGGING_WORKFLOW.md and current todo."
+    }
   ]
- },
- "logical_contracts": [
-  {
-   "id": "AIA-C01",
-   "name": "BuildConfiguration",
-   "owner": "__init__.py",
-   "status": "PARTIAL",
-   "invariant": "Sphinx config is validated, serializes only intended client-safe fields, and has explicit ownership.",
-   "verification": "config inventory + serialization tests"
-  },
-  {
-   "id": "AIA-C02",
-   "name": "ClientSafeSerialization",
-   "owner": "__init__.py -> window globals",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Production secrets never enter generated HTML/browser globals.",
-   "verification": "secret leakage positive-control tests"
-  },
-  {
-   "id": "AIA-C03",
-   "name": "BrowserRuntime",
-   "owner": "_static/ai-assistant.js",
-   "status": "PARTIAL",
-   "invariant": "Browser owns presentation/state only; security decisions remain server-enforced.",
-   "verification": "browser/service bypass tests"
-  },
-  {
-   "id": "AIA-C04",
-   "name": "RepresentationProducer",
-   "owner": "__init__.py build layer (generate_markdown_files, generate_llms_txt)",
-   "status": "ACTIVE",
-   "invariant": "The assistant emits the canonical static representation at build-finished; the browser consumes it for VIEW and ASK AI, and never presents a browser conversion as canonical.",
-   "verification": "producer contract exit criteria; COPY(static) and ASK AI resolve to identical content"
-  },
-  {
-   "id": "AIA-C05",
-   "name": "PromptAuthority",
-   "owner": "model/proxy service",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Server owns system policy; client/page content cannot set authoritative system role.",
-   "verification": "direct API prompt-role tests"
-  },
-  {
-   "id": "AIA-C06",
-   "name": "EndpointDiscovery",
-   "owner": "proxy GET / + browser client",
-   "status": "PARTIAL",
-   "invariant": "Discovery is non-secret, schema-versioned, and client/server drift is tested.",
-   "verification": "discovery contract tests"
-  },
-  {
-   "id": "AIA-C07",
-   "name": "ProxyRouting",
-   "owner": "_hf_spaces_proxy",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Server credentials are destination-bound to approved upstreams.",
-   "verification": "malicious BACKEND_URL test"
-  },
-  {
-   "id": "AIA-C08",
-   "name": "CorsOriginPolicy",
-   "owner": "proxy + worker",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Production CORS is explicit least privilege; parallel relays match policy.",
-   "verification": "origin allow/deny tests"
-  },
-  {
-   "id": "AIA-C09",
-   "name": "ShareAuthorization",
-   "owner": "proxy persistence/routes",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Read ID/capability does not imply edit/delete authority.",
-   "verification": "share read/edit capability tests"
-  },
-  {
-   "id": "AIA-C10",
-   "name": "ClientIdentity",
-   "owner": "proxy/worker",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Forwarded identity is accepted only from trusted proxy boundary.",
-   "verification": "spoofed forwarding tests"
-  },
-  {
-   "id": "AIA-C11",
-   "name": "RequestLimits",
-   "owner": "proxy/model/worker",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Body/resource limits prevent pre-validation memory exhaustion.",
-   "verification": "oversize streaming/buffering tests"
-  },
-  {
-   "id": "AIA-C12",
-   "name": "ModelServicePolicy",
-   "owner": "_hf_spaces_model",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Direct model endpoint enforces role/policy invariants independently of UI.",
-   "verification": "direct completion tests"
-  },
-  {
-   "id": "AIA-C13",
-   "name": "FeedbackProvenance",
-   "owner": "proxy dataset logic",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Persisted feedback/training data has consent/provenance and is never implicitly trusted.",
-   "verification": "dataset schema/provenance tests"
-  },
-  {
-   "id": "AIA-C14",
-   "name": "SettingsRegistry",
-   "owner": "browser settings",
-   "status": "PARTIAL",
-   "invariant": "Client settings have one validated schema/write path with explicit persistence and sensitivity.",
-   "verification": "Node registry tests + integration guard"
-  },
-  {
-   "id": "AIA-C15",
-   "name": "CorpusBoundary",
-   "owner": "cross-submodule",
-   "status": "PLANNED",
-   "invariant": "Corpus owns retrieval/evidence semantics; assistant consumes published retrieval contracts.",
-   "verification": "import/boundary tests"
-  },
-  {
-   "id": "AIA-C16",
-   "name": "MCPBoundary",
-   "owner": "cross-submodule",
-   "status": "PLANNED",
-   "invariant": "MCP owns protocol transport; assistant does not invent parallel MCP semantics.",
-   "verification": "integration boundary tests"
-  },
-  {
-   "id": "AIA-C17",
-   "name": "RuntimeHtmlFallback",
-   "owner": "browser/representation compatibility",
-   "status": "CURRENT_LEGACY",
-   "invariant": "DOM conversion remains observable fallback during staged static migration, not canonical target.",
-   "verification": "fallback-selection tests"
-  },
-  {
-   "id": "AIA-C18",
-   "name": "ServiceParity",
-   "owner": "proxy/model/worker",
-   "status": "VIOLATED_OR_UNPROVED",
-   "invariant": "Alternative service paths cannot bypass auth/CORS/routing/model-policy controls.",
-   "verification": "cross-path security matrix"
-  }
- ]
 }

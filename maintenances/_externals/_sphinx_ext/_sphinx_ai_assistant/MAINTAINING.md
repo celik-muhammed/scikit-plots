@@ -1,155 +1,127 @@
 # Maintaining `_sphinx_ai_assistant`
 
-This file is the **human and fresh-chat entry point** for the existing
-interactive Sphinx AI-assistant subsystem.
+This is the current human and fresh-chat entry point.
 
-The maintenance model is being normalized to the same durable control-plane
-logic used by `scikitplot.corpus` and `scikitplot.mcp`, while respecting this
-subsystem's larger multi-runtime trust boundary.
+## Source authorities
 
-## Current source anchor
+Two anchors are deliberately kept separate.
 
-```text
-archive: scikit-plots.zip
-sha256: 3f0d6862c27c41811cc19a91e34bd9789a653328a9247dbf34492a1cccbd726d
-```
+### Immutable release anchor
 
-Re-verify every current-source claim when this hash changes.
-
-## Current physical scope at the anchor
+Run 172 is the last fully closed/deployable release before this maintenance
+layout upgrade:
 
 ```text
-Sphinx extension             __init__.py                     5,592 lines
-browser runtime              _static/ai-assistant.js         22,772 lines
-browser styling              _static/ai-assistant.css        14,300 lines
-model service                _hf_spaces_model/app.py          2,446 lines
-proxy service                _hf_spaces_proxy/app.py          1,929 lines
-proxy shared logic           _hf_spaces_proxy/_shared_logic.py 1,454 lines
-proxy dataset schema         _hf_spaces_proxy/_dataset_schema.py 1,206 lines
-edge worker                  _cf_worker/index.js                499 lines
-dev proxy                    dev_proxy.py                       362 lines
-Sphinx test module           tests/test___init__.py            3,507 lines
-registered Sphinx config     add_config_value calls               90
+ZIP       scikitplot__sphinx_ai_assistant_run172.zip
+SHA-256   0d7ff4b4ee9f8530d574b247f8135e6107dd01fd3d59c6c7724d192b9946aa00
+patch     Run 171 -> 172
+patch SHA eac8ca450ac1fae581d29342877efdaade47668ac8a3f1f9812fbe9815235fb1
+manifest  82383e5c6fc421bcec2ee7a8f32991a403a7e1aedfc9aceddb9bbf2c024dd1e0
 ```
 
-Large files are **known structural debt baselines**. The maintenance goal is to
-prevent unbounded growth and new responsibility mixing, not to declare them
-incorrect merely because they are large.
+### Local debugging workspace anchor
 
-## Ownership boundary
-
-`_sphinx_llm` is **frozen**. It is not required by any assistant surface, and
-nothing imports it: measured, 0 references in `__init__.py`,
-`_static/ai-assistant.js`, `_static/__init__.py` or any test.
+The maintenance upgrade started from the user-supplied workspace:
 
 ```text
-_sphinx_ai_assistant
-  build layer   canonical representation: page.md + llms.txt, at build-finished
-  browser layer UI/state, endpoint discovery, interactive requests,
-                convenience Markdown via vendored Turndown
-
-_sphinx_ai_backend
-  proxy, model space, edge worker; reached over HTTP, imported by nothing
+archive  scikitplot__sphinx_ai_assistant_run172(2).zip
+SHA-256  a009fd065aa151a167f7e3d43f254b084c62a0261079bd1c9ec0877ce99e5a06
 ```
 
-So the assistant owns its canonical representation and emits it at build time.
+That workspace contains extra `skills/` and maintenance material and therefore
+is not the deployable Run 172 ZIP. Never confuse the two anchors.
 
-## The representation contract
+## Canonical test ownership — current
+
+Python tests mirror runtime modules exactly: `foo.py -> test_foo.py` and
+`__init__.py -> test___init__.py`. A large module may use non-collected
+`_cases/<source>/` fragments, but pytest sees only the one canonical owner.
+Cross-module contracts live only in `_integration/`; test-system contracts live
+in `_architecture/`; Python adapters for JS/CSS live in `_static/ai_assistant/`.
+The executable invariant is `tests/_architecture/test_test_layout.py`.
+
+## Current phase
+
+`LOCAL_TEST_RESTRUCTURE_READY_FOR_USER_RUN`
+
+The immediate goal is to make a fresh chat capable of continuing local failure
+repair without conversation history. Do not create a new feature run while the
+user is feeding local compile/test failures.
+
+## Repository planes
 
 ```text
-CANONICAL     static page.md        build-time, machine-fetchable
-CONVENIENCE   browser Turndown      runtime, clipboard only
+scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/
+    runtime + services + executable tests
 
-VIEW      -> canonical      opens the static .md URL
-ASK AI    -> canonical      sends the static .md URL
-COPY      -> convenience by default, canonical when the toggle selects `static`
+maintenances/_externals/_sphinx_ext/_sphinx_ai_assistant/
+    maintenance state + history + tools + examples
+
+skills/_externals/_sphinx_ext/_sphinx_ai_assistant/
+    SKILL.md + tiny entry documentation
 ```
 
-Canonical means the build-time artifact and nothing else. A browser conversion
-cannot be canonical however faithful it is, because no external agent can fetch
-a `blob:` URL — which is also why `View as Markdown` opens the static file.
-
-## Fresh-chat read order
-
-1. `_maintenance/MAINTENANCE_MODEL.md`
-2. `_maintenance/RULESET.md`
-3. `_maintenance/TRACKER_LOGICAL.md`
-4. `_maintenance/TRACKER_PHYSICAL.md`
-5. `_maintenance/SUBMODULE_STRUCTURE.md`
-6. `_maintenance/CONFIG_ARCHITECTURE.md`
-7. `_maintenance/INTEGRATION_CONTRACT.md`
-8. `_maintenance/RUNTIME_FLOW.md`
-9. `_maintenance/SECURITY_MODEL.md`
-10. `_maintenance/SECURITY_FINDINGS_INDEX.md`
-11. `_maintenance/REGISTRY.md`
-12. `_maintenance/VERIFICATION.md`
-13. `_maintenance/LEGACY_MAINTENANCE_MIGRATION.md` when reconciling the old docs
-
-Do not create new parallel files named `FINAL`, `REVISED`, `EXPANDED`,
-date-suffixed, or chat-specific variants inside the source tree.
-
-Read `_maintenance/HISTORY.md` only for completed rationale.
-
-Run first after overlay:
-
-```console
-python scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/_maintenance/check_trackers.py
-node --check scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/_static/ai-assistant.js
-node --check scikitplot/_externals/_sphinx_ext/_sphinx_ai_assistant/_cf_worker/index.js
-```
-
-## Governing rule
-
-> **The browser is presentation, documentation is untrusted evidence, and the
-> server owns authority. No secret, authorization decision, model system policy,
-> or trust assertion may depend on client-side enforcement. The assistant
-> consumes canonical static documentation representation; it does not define
-> that representation's authority.**
-
-## Desired vs current truth
-
-Existing maintenance prose contains desirable target statements such as
-“secrets live only on the server.” Current source must be checked before treating
-those statements as facts. The current architecture has configuration/token
-escape hatches and browser serialization/persistence surfaces that remain
-security-review items. `TRACKER_LOGICAL.md` therefore distinguishes `HOLDS`,
-`VIOLATED`, `PARTIAL`, and `PLANNED` explicitly.
-
-## Current verification snapshot in the extracted source tree
+The runtime submodule root is intentionally lean:
 
 ```text
-node --check _static/ai-assistant.js        GREEN
-node --check _cf_worker/index.js            GREEN
-node --check _maintenance/_ext_settings.js  GREEN
-node _maintenance/test_ext_settings.js      GREEN (79 passed, 0 failed)
-python compileall core/service modules       GREEN
-pytest tests/test_discovery_contract.py      GREEN (4 passed)
-full pytest suite                            ENVIRONMENT_BLOCKED/PARTIAL
-  observed: 453 passed, 5 failed, 59 errors
-  dominant blocker: Sphinx unavailable in the review environment
+README.md
+ISOLATION_DEPLOYMENT.md
+ACTIVITY_AND_FILE_PREVIEW_GUIDE.md
+__init__.py
+_example_conf.py
 ```
 
-Do not interpret the full-suite line as a clean product failure or as green; rerun
-in the canonical docs/test environment.
+Proxy-specific feedback/dataset operator guides live beside `_hf_spaces_proxy`.
+The local-only development proxy and old proxy-conf example live in maintenance.
 
-## Fresh-chat continuation prompt
+## Run 172 behavior that must not regress
 
-> Review the current `_sphinx_ai_assistant` source from the supplied source
-> snapshot. Verify the hash first. Read `MAINTAINING.md` and the maintenance
-> rules/trackers/registry/security model/verification contract. `_sphinx_llm` is
-> **frozen** — do not read it, do not depend on it, and do not restore any edge
-> to it. Do not edit production code until the active checkpoint is explicit.
-> Preserve server-owned authority, treat page/retrieved content as untrusted
-> reference data, and prevent client-visible secrets. The assistant owns its
-> canonical representation: `page.md` and `llms.txt` are written at
-> `build-finished`, `VIEW` and `ASK AI` use the static `.md`, and the browser
-> Turndown path is convenience that must never be labelled canonical. Record
-> every new finding with evidence, severity, owner, regression gate, and exact
-> next action.
+- first-message privacy/status banner uses existing Privacy & Responsibility sheet;
+- quick model switching reuses canonical model authority;
+- activity timeline shows public work/status summaries, not hidden chain-of-thought;
+- generated file preview uses latest-state authority and tombstones stale revisions;
+- session preview retention is bounded;
+- bulk changed-file download rejects portable-path collisions;
+- chat turns own cancellation token/controller/reader state;
+- stopped/superseded turns cannot append late work or retry reasoning;
+- async share/contribution actions remain bound to their original conversation generation;
+- telemetry stays permission-gated;
+- release-security subprocess environments stay constrained.
 
-## Updating maintenance state
+## Local test-repair workflow
 
-For every material change update `REGISTRY.md`, `STATE.json`, the relevant
-tracker, and `VERIFICATION.md`. Complete a checkpoint before starting a new
-parallel architecture document. Archive superseded research rather than letting
-multiple “final” documents compete as source truth.
+For every failure:
+
+1. record the exact command and traceback;
+2. classify code vs test vs environment vs race/broken-pipe vs path/layout;
+3. reproduce the smallest node/test;
+4. inspect the owning contract only;
+5. fix the smallest correct surface;
+6. rerun the failing test;
+7. rerun adjacent tests sharing the contract;
+8. run the broader gate only after focused green;
+9. update `todo/lessons.md` if the failure reveals a reusable rule.
+
+Do not package during this phase unless the user explicitly asks.
+
+## Known harness behavior
+
+- Runs 163-168 cryptographic fixtures may require fresh-process/node-ID isolation.
+- `pytest | tee` can appear hung because descendants inherit the pipe; prefer direct redirection for heavy release tests.
+- Count only completed summaries.
+- A missing-Sphinx traceback is an environment boundary, not proof that a local Sphinx build fails.
+- Browser/Node and mutation suites are release gates when JS/security semantics change.
+
+## Verification commands
+
+Maintenance structure:
+
+```bash
+python maintenances/_externals/_sphinx_ext/_sphinx_ai_assistant/_maintenance/tools/check_trackers.py
+```
+
+Focused structural/documentation tests after this layout change should include
+the tests that reference the maintenance dev proxy and the relocated proxy guides.
+
+See `_maintenance/VERIFICATION.md` for the durable gate map and
+`_maintenance/FRESH_CHAT_HANDOFF.md` for the exact continuation script.

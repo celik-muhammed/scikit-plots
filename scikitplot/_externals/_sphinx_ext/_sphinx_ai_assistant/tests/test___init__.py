@@ -29,28 +29,27 @@ Coverage targets
 * 16 — html_to_markdown / strip_tags coercion.
 * 17 — _write_progress_bar (in __all__).
 * 18 — _resolve_icon (backup SVG fallback).
-* 19 — _static subpackage — SVG constants & _PROVIDER_META.
-* 20 — Theme selector presets (_THEME_SELECTOR_PRESETS ≥ 20 themes).
-* 21 — _resolve_content_selectors.
-* 22 — _DEFAULT_CONTENT_SELECTORS.
-* 23 — _process_html_file_worker (6-tuple, separate output dir).
-* 24 — _process_single_html_file (5-tuple wrapper).
-* 25 — process_html_directory (all branches).
-* 26 — generate_llms_txt_standalone (all branches).
-* 27 — generate_markdown_files (Sphinx hook).
-* 28 — generate_llms_txt (Sphinx hook).
-* 29 — add_ai_assistant_context (all branches, icon resolution).
-* 30 — setup() — metadata, config values, events, static path.
-* 31 — _OLLAMA_RECOMMENDED_MODELS.
-* 32 — _DEFAULT_MCP_TOOLS (all 5 tools).
-* 33 — _validate_mcp_tool.
-* 34 — _cfg_str / _cfg_bool helpers.
-* 35 — Extended provider registry (deepseek, huggingface, custom).
-* 36 — setup() extended config values.
-* 37 — add_ai_assistant_context extended fields.
-* 38 — Ollama local provider support.
-* 39 — Full provider round-trip (filter → context → JSON).
-* 40 — Edge cases and invariants.
+* 19 — Theme selector presets (_THEME_SELECTOR_PRESETS ≥ 20 themes).
+* 19 — _resolve_content_selectors.
+* 19 — _DEFAULT_CONTENT_SELECTORS.
+* 19 — _process_html_file_worker (6-tuple, separate output dir).
+* 19 — _process_single_html_file (5-tuple wrapper).
+* 19 — process_html_directory (all branches).
+* 19 — generate_llms_txt_standalone (all branches).
+* 19 — generate_markdown_files (Sphinx hook).
+* 19 — generate_llms_txt (Sphinx hook).
+* 19 — add_ai_assistant_context (all branches, icon resolution).
+* 19 — setup() — metadata, config values, events, static path.
+* 19 — _OLLAMA_RECOMMENDED_MODELS.
+* 19 — _DEFAULT_MCP_TOOLS (all 5 tools).
+* 19 — _validate_mcp_tool.
+* 19 — _cfg_str / _cfg_bool helpers.
+* 19 — Extended provider registry (deepseek, huggingface, custom).
+* 19 — setup() extended config values.
+* 19 — add_ai_assistant_context extended fields.
+* 19 — Ollama local provider support.
+* 19 — Full provider round-trip (filter → context → JSON).
+* 19 — Edge cases and invariants.
 """
 from __future__ import annotations
 
@@ -64,7 +63,7 @@ import re
 from urllib.parse import urlparse
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 from bs4 import BeautifulSoup
@@ -923,95 +922,7 @@ class TestResolveIcon:
 
 
 # ===========================================================================
-# 19. _static subpackage — SVG constants & _PROVIDER_META
-# ===========================================================================
-
-class TestStaticSubpackage:
-    """Tests for _static/__init__.py SVG constants and _PROVIDER_META."""
-
-    @pytest.fixture(autouse=True)
-    def _import_static(self):
-        self._static = importlib.import_module(
-            "scikitplot._externals._sphinx_ext._sphinx_ai_assistant._static"
-        )
-
-    # --- SVG constants ---
-
-    def test_svg_copy_is_data_uri(self):
-        assert self._static._SVG_COPY.startswith("data:image/svg+xml;base64,")
-
-    def test_svg_markdown_is_data_uri(self):
-        assert self._static._SVG_MARKDOWN.startswith("data:image/svg+xml;base64,")
-
-    def test_svg_claude_is_data_uri(self):
-        assert self._static._SVG_CLAUDE.startswith("data:image/svg+xml;base64,")
-
-    def test_svg_chatgpt_is_data_uri(self):
-        assert self._static._SVG_CHATGPT.startswith("data:image/svg+xml;base64,")
-
-    def test_svg_gemini_is_data_uri(self):
-        assert self._static._SVG_GEMINI.startswith("data:image/svg+xml;base64,")
-
-    def test_svg_ollama_is_data_uri(self):
-        assert self._static._SVG_OLLAMA.startswith("data:image/svg+xml;base64,")
-
-    def test_svg_default_is_data_uri(self):
-        assert self._static._SVG_DEFAULT.startswith("data:image/svg+xml;base64,")
-
-    def test_all_svg_constants_non_empty(self):
-        for name in ("_SVG_COPY", "_SVG_MARKDOWN", "_SVG_CLAUDE",
-                     "_SVG_CHATGPT", "_SVG_GEMINI", "_SVG_OLLAMA", "_SVG_DEFAULT"):
-            val = getattr(self._static, name)
-            assert val and len(val) > 50, f"{name} too short or empty"
-
-    def test_svg_constants_all_unique(self):
-        vals = [
-            self._static._SVG_CLAUDE, self._static._SVG_CHATGPT,
-            self._static._SVG_GEMINI, self._static._SVG_OLLAMA,
-        ]
-        # Named provider icons should be distinct
-        assert len(set(vals)) == len(vals), "Provider SVG constants are not all unique"
-
-    # --- _PROVIDER_META ---
-
-    def test_provider_meta_is_dict(self):
-        assert isinstance(self._static._PROVIDER_META, dict)
-
-    def test_provider_meta_non_empty(self):
-        assert len(self._static._PROVIDER_META) >= 12
-
-    def test_required_providers_present(self):
-        required = {"claude", "chatgpt", "gemini", "ollama", "mistral",
-                    "perplexity", "copilot", "groq", "you", "deepseek",
-                    "huggingface", "custom"}
-        for name in required:
-            assert name in self._static._PROVIDER_META, f"Missing: {name!r}"
-
-    def test_all_entries_have_icon_and_desc(self):
-        for name, meta in self._static._PROVIDER_META.items():
-            assert "icon" in meta and "desc" in meta, f"{name!r} incomplete"
-            assert meta["icon"].startswith("data:image/svg+xml;base64,"), (
-                f"{name!r} icon is not a data URI"
-            )
-            assert meta["desc"], f"{name!r} desc is empty"
-
-    def test_mcp_tool_keys_present(self):
-        for key in ("vscode", "claude_desktop", "cursor", "windsurf", "generic"):
-            assert key in self._static._PROVIDER_META, f"MCP key {key!r} missing"
-
-    def test_claude_icon_is_svg_claude(self):
-        assert self._static._PROVIDER_META["claude"]["icon"] == self._static._SVG_CLAUDE
-
-    def test_chatgpt_icon_is_svg_chatgpt(self):
-        assert self._static._PROVIDER_META["chatgpt"]["icon"] == self._static._SVG_CHATGPT
-
-    def test_all_in_all_list(self):
-        for name in ("_SVG_COPY", "_SVG_DEFAULT", "_PROVIDER_META"):
-            assert name in self._static.__all__
-
-
-# ===========================================================================
-# 20. Theme selector presets
+# 19. Theme selector presets
 # ===========================================================================
 
 class TestThemeSelectorPresets:
@@ -1046,7 +957,7 @@ class TestThemeSelectorPresets:
 
 
 # ===========================================================================
-# 21. _resolve_content_selectors
+# 19. _resolve_content_selectors
 # ===========================================================================
 
 class TestResolveContentSelectors:
@@ -1092,7 +1003,7 @@ class TestResolveContentSelectors:
 
 
 # ===========================================================================
-# 22. _DEFAULT_CONTENT_SELECTORS
+# 19. _DEFAULT_CONTENT_SELECTORS
 # ===========================================================================
 
 class TestDefaultContentSelectors:
@@ -1113,7 +1024,7 @@ class TestDefaultContentSelectors:
 
 
 # ===========================================================================
-# 23. _process_html_file_worker (6-tuple)
+# 19. _process_html_file_worker (6-tuple)
 # ===========================================================================
 
 class TestProcessHtmlFileWorker:
@@ -1259,7 +1170,7 @@ class TestProcessHtmlFileWorker:
 
 
 # ===========================================================================
-# 24. _process_single_html_file (5-tuple wrapper)
+# 19. _process_single_html_file (5-tuple wrapper)
 # ===========================================================================
 
 class TestProcessSingleHtmlFile:
@@ -1323,7 +1234,7 @@ class TestProcessSingleHtmlFile:
 
 
 # ===========================================================================
-# 25. process_html_directory
+# 19. process_html_directory
 # ===========================================================================
 
 class TestProcessHtmlDirectory:
@@ -1435,7 +1346,7 @@ class TestProcessHtmlDirectory:
 
 
 # ===========================================================================
-# 26. generate_llms_txt_standalone
+# 19. generate_llms_txt_standalone
 # ===========================================================================
 
 class TestGenerateLlmsTxtStandalone:
@@ -1508,7 +1419,7 @@ class TestGenerateLlmsTxtStandalone:
 
 
 # ===========================================================================
-# 27. generate_markdown_files (Sphinx hook)
+# 19. generate_markdown_files (Sphinx hook)
 # ===========================================================================
 
 class TestGenerateMarkdownFiles:
@@ -1580,7 +1491,7 @@ class TestGenerateMarkdownFiles:
 
 
 # ===========================================================================
-# 28. generate_llms_txt (Sphinx hook)
+# 19. generate_llms_txt (Sphinx hook)
 # ===========================================================================
 
 class TestGenerateLlmsTxt:
@@ -1722,7 +1633,7 @@ class TestGenerateLlmsTxt:
 
 
 # ===========================================================================
-# 29. add_ai_assistant_context
+# 19. add_ai_assistant_context
 # ===========================================================================
 
 class TestAddAiAssistantContext:
@@ -1879,7 +1790,7 @@ class TestAddAiAssistantContext:
 
 
 # ===========================================================================
-# 30. setup()
+# 19. setup()
 # ===========================================================================
 
 class TestSetup:
@@ -1915,16 +1826,48 @@ class TestSetup:
         }
         assert required.issubset(names), f"Missing: {required - names}"
 
+    def test_shared_sphinx_fixture_covers_every_registered_config(self, app, sphinx_app):
+        """The shared MagicMock config must not invent values on demand.
+
+        Missing config attributes on ``MagicMock`` auto-create nested mocks.
+        Strict validators then (correctly) reject those mocks, which can add
+        unrelated warnings/errors to tests that are asserting another signal.
+        Keep the fixture synchronized with every value registered by setup().
+        """
+        _mod.setup(app)
+        registered = {c[0][0] for c in app.add_config_value.call_args_list}
+        unresolved = sorted(
+            name
+            for name in registered
+            if isinstance(getattr(sphinx_app.config, name), MagicMock)
+        )
+        assert unresolved == [], (
+            "tests/conftest.py::_make_config is missing concrete defaults for: "
+            + ", ".join(unresolved)
+        )
+
     def test_events_connected(self, app):
         _mod.setup(app)
         event_names = [c[0][0] for c in app.connect.call_args_list]
         assert "html-page-context" in event_names
-        assert event_names.count("build-finished") == 2
+        build_finished_handlers = [
+            c[0][1]
+            for c in app.connect.call_args_list
+            if c[0][0] == "build-finished"
+        ]
+        assert build_finished_handlers == [
+            _mod.generate_isolation_policy,
+            _mod.generate_markdown_files,
+            _mod.generate_llms_txt,
+        ]
 
     def test_css_and_js_added(self, app):
         _mod.setup(app)
         app.add_css_file.assert_called_once_with("ai-assistant.css")
-        app.add_js_file.assert_called_once_with("ai-assistant.js", loading_method='defer')
+        assert app.add_js_file.call_args_list == [
+            call("ai-assistant-isolation-host.js", loading_method="defer"),
+            call("ai-assistant.js", loading_method="defer"),
+        ]
 
     def test_static_path_appended(self, app):
         _mod.setup(app)
@@ -1966,7 +1909,7 @@ class TestSetup:
 
 
 # ===========================================================================
-# 31. _OLLAMA_RECOMMENDED_MODELS
+# 19. _OLLAMA_RECOMMENDED_MODELS
 # ===========================================================================
 
 class TestOllamaRecommendedModels:
@@ -2011,7 +1954,7 @@ class TestOllamaRecommendedModels:
 
 
 # ===========================================================================
-# 32. _DEFAULT_MCP_TOOLS
+# 19. _DEFAULT_MCP_TOOLS
 # ===========================================================================
 
 class TestDefaultMcpTools:
@@ -2058,7 +2001,7 @@ class TestDefaultMcpTools:
 
 
 # ===========================================================================
-# 33. _validate_mcp_tool
+# 19. _validate_mcp_tool
 # ===========================================================================
 
 class TestValidateMcpTool:
@@ -2112,7 +2055,7 @@ class TestValidateMcpTool:
 
 
 # ===========================================================================
-# 34. _cfg_str and _cfg_bool
+# 19. _cfg_str and _cfg_bool
 # ===========================================================================
 
 class TestCfgHelpers:
@@ -2171,7 +2114,7 @@ class TestCfgHelpers:
 
 
 # ===========================================================================
-# 35. Extended provider registry
+# 19. Extended provider registry
 # ===========================================================================
 
 class TestExtendedProviderRegistry:
@@ -2219,7 +2162,7 @@ class TestExtendedProviderRegistry:
 
 
 # ===========================================================================
-# 36. setup() extended config values
+# 19. setup() extended config values
 # ===========================================================================
 
 class TestSetupExtended:
@@ -2279,7 +2222,7 @@ class TestSetupExtended:
 
 
 # ===========================================================================
-# 37. Ollama local provider
+# 19. Ollama local provider
 # ===========================================================================
 
 class TestOllamaLocalSupport:
@@ -2312,7 +2255,7 @@ class TestOllamaLocalSupport:
 
 
 # ===========================================================================
-# 38. Full provider round-trip
+# 19. Full provider round-trip
 # ===========================================================================
 
 class TestProviderRoundTrip:
@@ -2336,7 +2279,7 @@ class TestProviderRoundTrip:
 
 
 # ===========================================================================
-# 39. Edge cases and invariants
+# 19. Edge cases and invariants
 # ===========================================================================
 
 class TestEdgeCases:
@@ -3485,6 +3428,7 @@ class TestV03ConfigPlumbing:
 
     _V03_KEYS = [
         "panelPersist",
+        "panelRememberConversation",
         "panelShortcut",
         "panelApiUrl",
         "panelApiModel",
@@ -3505,6 +3449,10 @@ class TestV03ConfigPlumbing:
         # trigger pill UX keys (v0.2/v0.3 boundary)
         "panelTriggerLabel",
         "panelStartMinimized",
+        "panelTriggerToggle",
+        "panelReasoning",
+        "panelInjectionNotice",
+        "panelModelEditing",
         # search-bar position
         "searchBarPosition",
     ]
@@ -3527,9 +3475,20 @@ class TestV03ConfigPlumbing:
         # Safe defaults: persistence on, shortcut safe chord, search-bar OFF,
         # feedback on, no proxy configured.
         assert cfg["panelPersist"] is True
+        assert cfg["panelRememberConversation"] is True
         assert cfg["panelShortcut"] == "Alt+Shift+A"
         assert cfg["searchBar"] is False
         assert cfg["panelApiUrl"] == ""
+        # The trigger-pill visibility switch is offered by default, and its
+        # build default keeps the pill on screen — an upgrade with no conf.py
+        # change must render exactly what the previous release rendered.
+        assert cfg["panelTriggerToggle"] is True
+        # Reasoning parameters are opt-in: a deployment that has not declared
+        # support must send a request body identical to the pre-feature one.
+        assert cfg["panelReasoning"] is False
+        assert cfg["panelInjectionNotice"] is True
+        assert cfg["panelModelEditing"] is True
+        assert cfg["panelStartMinimized"] is True
 
     def test_v03_config_json_serialisable(self, sphinx_app):
         import json
@@ -3554,3 +3513,122 @@ class TestCfgListHelper:
 
     def test_missing_key_returns_empty(self):
         assert _mod._cfg_list(type("C", (), {})(), "absent") == []
+
+
+# ===========================================================================
+# Stub test models in the picker
+# ===========================================================================
+
+
+_EP_URL = "https://proxy.example.org/v1/chat/completions"
+
+
+class TestStubModelInjection:
+    """`ai_assistant_panel_stub_models` appends test entries, safely."""
+
+    def test_no_endpoint_means_no_stub_entries(self):
+        """A stub entry pointing nowhere turns a diagnostic into a second
+        thing to diagnose."""
+        models = [{"id": "real", "model": "m", "provider": "custom"}]
+        assert _mod._with_stub_models(models, True, "") is models
+
+    def test_endpoint_is_inherited_from_the_first_real_model(self):
+        """The stub must reach the SAME proxy the site already uses."""
+        models = [{"id": "real", "model": "m", "endpoint": _EP_URL}]
+        assert _mod._stub_endpoint(models, "") == _EP_URL
+
+    def test_endpoint_falls_back_to_the_shared_url(self):
+        assert _mod._stub_endpoint([], _EP_URL) == _EP_URL
+
+    def test_endpoint_prefers_a_model_entry_over_the_shared_url(self):
+        models = [{"id": "real", "model": "m", "endpoint": _EP_URL}]
+        assert _mod._stub_endpoint(models, "https://other.example/v1") == _EP_URL
+
+    def test_endpoint_skips_entries_without_one(self):
+        models = [{"id": "a", "model": "m"}, {"id": "b", "endpoint": _EP_URL}]
+        assert _mod._stub_endpoint(models, "") == _EP_URL
+
+    def test_endpoint_resolution_survives_junk_entries(self):
+        assert _mod._stub_endpoint(["nope", None, 7], "") == ""
+        assert _mod._stub_endpoint(None, "") == ""
+
+    def test_every_stub_entry_carries_the_inherited_endpoint(self):
+        out = _mod._with_stub_models([], True, _EP_URL)
+        assert all(e["endpoint"] == _EP_URL for e in out)
+
+    def test_disabled_by_default_leaves_the_list_untouched(self):
+        models = [{"id": "real", "model": "m", "provider": "custom"}]
+        assert _mod._with_stub_models(models, False) is models
+
+    def test_enabled_appends_the_stub_entries(self):
+        models = [{"id": "real", "model": "m", "provider": "custom"}]
+        out = _mod._with_stub_models(models, True, _EP_URL)
+        ids = [e["id"] for e in out]
+        assert ids[0] == "real"
+        assert "stub-echo" in ids
+        assert "stub-mirror" in ids
+        assert "stub-error" in ids
+        assert "stub-hostile" in ids
+        assert "stub-qa" in ids
+        assert "stub-slow" in ids
+
+    def test_stub_entries_come_last(self):
+        """Appending, not prepending: order decides the fallback active model."""
+        models = [{"id": "real", "model": "m", "provider": "custom"}]
+        out = _mod._with_stub_models(models, True, _EP_URL)
+        assert out[0]["id"] == "real"
+        assert all(e["id"].startswith("stub-") for e in out[1:])
+
+    def test_no_stub_entry_claims_default(self):
+        """Enabling the rig must not change which model a reader talks to."""
+        out = _mod._with_stub_models([], True, _EP_URL)
+        assert all(e.get("default") is not True for e in out)
+
+    def test_every_stub_model_id_uses_the_reserved_prefix(self):
+        out = _mod._with_stub_models([], True, _EP_URL)
+        assert all(e["model"].startswith("stub/") for e in out)
+
+    def test_entries_are_copies_not_the_module_level_dicts(self):
+        """A caller mutating the result must not corrupt the build."""
+        out = _mod._with_stub_models([], True, _EP_URL)
+        out[0]["label"] = "mutated"
+        again = _mod._with_stub_models([], True, _EP_URL)
+        assert again[0]["label"] != "mutated"
+
+    def test_non_list_input_is_returned_unchanged(self):
+        """Never convert the legacy string form into something invalid."""
+        assert _mod._with_stub_models("legacy-string", True, _EP_URL) == "legacy-string"
+        assert _mod._with_stub_models(None, True, _EP_URL) is None
+
+    def test_echo_entry_declares_reasoning_support(self):
+        """Only a declaring entry makes the panel SEND the fields to report."""
+        out = _mod._with_stub_models([], True, _EP_URL)
+        echo = next(e for e in out if e["id"] == "stub-echo")
+        assert echo["reasoning"] is True
+
+    def test_mirror_entry_declares_reasoning_support(self):
+        out = _mod._with_stub_models([], True, _EP_URL)
+        mirror = next(e for e in out if e["id"] == "stub-mirror")
+        assert mirror["model"] == "stub/mirror"
+        assert mirror["reasoning"] is True
+
+    def test_qa_entry_does_not_declare_it(self):
+        """So the two request shapes can be compared in one session."""
+        out = _mod._with_stub_models([], True, _EP_URL)
+        qa = next(e for e in out if e["id"] == "stub-qa")
+        assert "reasoning" not in qa
+
+    def test_entries_survive_the_real_validator(self):
+        """They pass through _filter_panel_models like any other entry."""
+        out = _mod._filter_panel_models(_mod._with_stub_models([], True, _EP_URL))
+        assert len(out) == 6
+        assert {e["id"] for e in out} == {
+            "stub-echo", "stub-mirror", "stub-error",
+            "stub-hostile", "stub-qa", "stub-slow"
+        }
+
+# Large-contract case fragments are collected only through this canonical owner.
+from scikitplot._externals._sphinx_ext._sphinx_ai_assistant.tests._case_loader import export_case_tests as _export_case_tests
+
+_export_case_tests(globals(), package=__package__, case_package='_cases.root_init', cases=('conversion_rules', 'llms_txt'))
+del _export_case_tests
