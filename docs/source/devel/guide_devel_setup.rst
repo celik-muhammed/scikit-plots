@@ -12,8 +12,9 @@ Development Setup Guidelines
 
 To set up scikit-plots for development follow these steps:
 
-.. contents::
+.. contents:: On this page
    :local:
+   :depth: 2
 
 Fork the scikit-plots repository
 ================================

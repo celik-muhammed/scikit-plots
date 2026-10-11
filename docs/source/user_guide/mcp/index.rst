@@ -16,6 +16,11 @@
   # attention, caution, danger, error, hint, important, note, tip, warning, admonition, seealso
   # versionadded, versionchanged, deprecated, versionremoved, rubric, centered, hlist
 
+.. contents:: On this page
+   :local:
+   :depth: 2
+   :backlinks: entry
+
 .. currentmodule:: scikitplot.mcp
 
 .. _mcp-index:
@@ -41,10 +46,6 @@ finds and ranks evidence; it does not make the underlying data true.
 .. seealso::
   * https://github.com/modelcontextprotocol/python-sdk
   * https://github.com/semantica-agi/semantica
-
-.. contents:: On this page
-   :local:
-   :depth: 2
 
 Scientific grounding: evidence, not absolute truth
 --------------------------------------------------

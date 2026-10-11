@@ -8,6 +8,11 @@
   ^ for subsubsections          : ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
   " for paragraphs              : """"""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""""
 
+.. contents:: On this page
+   :local:
+   :depth: 2
+   :backlinks: entry
+
 .. _decile-modelplotpy-index:
 
 ModelPlotPy

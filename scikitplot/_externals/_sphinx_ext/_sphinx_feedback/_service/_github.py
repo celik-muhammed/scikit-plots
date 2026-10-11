@@ -27,7 +27,7 @@ from .._contracts import (
     repository_event_bytes,
     validate_request_hash,
 )
-from ._config import StorageTarget
+from ._config import DEFAULT_GITHUB_API_URL, StorageTarget
 
 _MAX_RESPONSE = 256 * 1024
 _MAX_RESPONSE_CHUNKS = 1024
@@ -50,15 +50,24 @@ async def _bounded_json(  # ruff: ignore[too-many-branches]
     headers: dict[str, str],
     json_body: Any = None,
     params: dict[str, str] | None = None,
+    content: bytes | None = None,
+    label: str = "GitHub",
 ) -> tuple[int, Any]:
-    """Perform one bounded GitHub API request even with an unbounded shared client."""
+    """
+    Perform one bounded provider request even with an unbounded shared client.
+
+    ``content`` sends raw bytes (the webhook adapter signs exactly these bytes);
+    otherwise ``json_body`` is serialized by the client. ``label`` names the
+    provider in the stable, token-free error messages.
+    """
     response = None
     try:
         request = client.build_request(
             method,
             url,
             headers=headers,
-            json=json_body,
+            json=json_body if content is None else None,
+            content=content,
             params=params,
             timeout=_REQUEST_TIMEOUT_SECONDS,
         )
@@ -69,7 +78,7 @@ async def _bounded_json(  # ruff: ignore[too-many-branches]
                 if int(length) > _MAX_RESPONSE:
                     raise ProviderWriteError(
                         "provider_response_too_large",
-                        "GitHub response exceeded the safety limit",
+                        f"{label} response exceeded the safety limit",
                     )
             except ValueError:
                 pass
@@ -81,13 +90,13 @@ async def _bounded_json(  # ruff: ignore[too-many-branches]
             if chunk_count > _MAX_RESPONSE_CHUNKS:
                 raise ProviderWriteError(
                     "provider_response_too_fragmented",
-                    "GitHub response exceeded the response-frame safety limit",
+                    f"{label} response exceeded the response-frame safety limit",
                 )
             total += len(chunk)
             if total > _MAX_RESPONSE:
                 raise ProviderWriteError(
                     "provider_response_too_large",
-                    "GitHub response exceeded the safety limit",
+                    f"{label} response exceeded the safety limit",
                 )
             chunks.append(chunk)
         raw = b"".join(chunks)
@@ -104,7 +113,7 @@ async def _bounded_json(  # ruff: ignore[too-many-branches]
             ) as exc:
                 raise ProviderWriteError(
                     "provider_response_invalid",
-                    "GitHub returned invalid JSON",
+                    f"{label} returned invalid JSON",
                 ) from exc
         return int(response.status_code), payload
     except ProviderWriteError:
@@ -114,7 +123,7 @@ async def _bounded_json(  # ruff: ignore[too-many-branches]
         # exception remains chained for server-side diagnostics.
         raise ProviderWriteError(
             "provider_transport_failed",
-            "GitHub feedback transport failed",
+            f"{label} feedback transport failed",
         ) from exc
     finally:
         if response is not None:
@@ -169,7 +178,26 @@ def _object_sha(payload: Any, *, code: str) -> str:
     return sha
 
 
-def _review_url(value: Any, *, repo: str | None = None) -> str:
+def _web_authority(api_url: str) -> tuple[str, int | None]:
+    """
+    Return the host and port that review (pull request) URLs must use.
+
+    github.com serves its API from ``api.github.com``; GitHub Enterprise
+    Server serves both from one host (``https://ghe.example/api/v3``).
+    """
+    parsed = urlsplit(api_url or DEFAULT_GITHUB_API_URL)
+    host = (parsed.hostname or "").lower()
+    if host == "api.github.com":
+        return "github.com", None
+    return host, parsed.port
+
+
+def _review_url(
+    value: Any,
+    *,
+    repo: str | None = None,
+    web: tuple[str, int | None] = ("github.com", None),
+) -> str:
     text = str(value or "").strip()
     try:
         parsed = urlsplit(text)
@@ -178,14 +206,16 @@ def _review_url(value: Any, *, repo: str | None = None) -> str:
         raise ProviderWriteError(
             "review_lookup_invalid", "GitHub feedback review URL was invalid"
         ) from exc
+    web_host, web_port = web
     if (
-        parsed.scheme != "https"
-        or (parsed.hostname or "").lower() != "github.com"
+        parsed.scheme not in {"https", "http"}
+        or (parsed.scheme == "http" and web_port is None)
+        or (parsed.hostname or "").lower() != web_host
         or parsed.username
         or parsed.password
         or parsed.query
         or parsed.fragment
-        or port not in (None, 443)
+        or port not in ({None, 443} if web_port in (None, 443) else {web_port})
     ):
         raise ProviderWriteError(
             "review_lookup_invalid", "GitHub feedback review URL was invalid"
@@ -209,6 +239,7 @@ async def _existing_review_url(
     repo: str,
     branch: str,
     base_branch: str,
+    web: tuple[str, int | None] = ("github.com", None),
 ) -> str | None:
     owner = repo.split("/", 1)[0]
     status, pulls = await _bounded_json(
@@ -236,7 +267,7 @@ async def _existing_review_url(
             "review_lookup_invalid",
             "GitHub feedback review lookup returned an invalid entry",
         )
-    return _review_url(first.get("html_url"), repo=repo)
+    return _review_url(first.get("html_url"), repo=repo, web=web)
 
 
 async def _branch_comparison(
@@ -444,7 +475,8 @@ async def submit_github_review(  # ruff: ignore[too-many-branches]
             "GitHub feedback request commitment does not match the durable event",
         )
     repo = target.repo
-    api = "https://api.github.com/repos/" + repo
+    api = (target.api_url or DEFAULT_GITHUB_API_URL).rstrip("/") + "/repos/" + repo
+    web = _web_authority(target.api_url)
     headers = _headers(token)
     branch = _branch(event)
     if branch == target.branch:
@@ -581,6 +613,7 @@ async def submit_github_review(  # ruff: ignore[too-many-branches]
         repo=repo,
         branch=branch,
         base_branch=target.branch,
+        web=web,
     )
     await _verify_review_branch_scope(
         client,
@@ -636,6 +669,7 @@ async def submit_github_review(  # ruff: ignore[too-many-branches]
                 repo=repo,
                 branch=branch,
                 base_branch=target.branch,
+                web=web,
             )
         except ProviderWriteError:
             raise exc  # ruff: ignore[raise-without-from-inside-except]
@@ -668,6 +702,7 @@ async def submit_github_review(  # ruff: ignore[too-many-branches]
             repo=repo,
             branch=branch,
             base_branch=target.branch,
+            web=web,
         )
         if existing_review is not None:
             await _verify_review_branch_scope(
@@ -694,7 +729,7 @@ async def submit_github_review(  # ruff: ignore[too-many-branches]
         raise ProviderWriteError(
             "review_open_invalid", "GitHub feedback pull request response was invalid"
         )
-    review_url = _review_url(pull.get("html_url"), repo=repo)
+    review_url = _review_url(pull.get("html_url"), repo=repo, web=web)
     await _verify_review_branch_scope(
         client,
         api=api,

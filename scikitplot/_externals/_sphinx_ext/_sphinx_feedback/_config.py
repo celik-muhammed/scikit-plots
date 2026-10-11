@@ -7,7 +7,6 @@ import json
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 from ._contracts import (
     AGGREGATE_CONTRACT,
@@ -15,6 +14,12 @@ from ._contracts import (
     normalize_page_id,
     normalize_page_revision,
     normalize_site_id,
+)
+from ._network import (
+    NetworkPolicyError,
+    normalize_policy,
+    normalize_private_suffixes,
+    validate_endpoint_url,
 )
 
 DEFAULT_SIDEBAR_SELECTORS = (
@@ -85,43 +90,51 @@ def _plain_string(value: Any, *, name: str, maximum: int, empty: bool = True) ->
     return value
 
 
-def validate_endpoint(value: Any) -> str:
-    """Accept HTTPS or localhost HTTP endpoints with no credentials/fragments."""
-    endpoint = _plain_string(value, name="feedback_endpoint", maximum=2048)
-    if not endpoint:
-        return ""
+def validate_endpoint(
+    value: Any,
+    *,
+    policy: Any = "strict",
+    private_suffixes: Any = (),
+) -> str:
+    """
+    Validate ``feedback_endpoint`` under ``feedback_endpoint_policy``.
+
+    Parameters
+    ----------
+    value : str
+        ``""``, a same-origin path (``/v1/feedback``) or an http(s) URL.
+    policy : {"strict", "private-network", "any"}, default "strict"
+        ``"strict"``: HTTPS on port 443, loopback HTTP(S), same-origin path.
+        ``"private-network"``: adds HTTPS on any port and HTTP to private hosts.
+        ``"any"``: adds HTTP to any host.
+    private_suffixes : str or sequence of str, default ()
+        Extra private name suffixes (``feedback_private_host_suffixes``).
+
+    Returns
+    -------
+    str
+        The endpoint without a trailing slash, or ``""``.
+
+    Raises
+    ------
+    FeedbackConfigError
+        If the value or policy is invalid, or the policy forbids the endpoint.
+
+    See Also
+    --------
+    _sphinx_feedback._network.validate_endpoint_url : The shared rule.
+    """
+    _plain_string(value, name="feedback_endpoint", maximum=2048)
     try:
-        parsed = urlsplit(endpoint)
-        port = parsed.port
-    except ValueError as exc:
-        raise FeedbackConfigError(
-            "feedback_endpoint is not a valid URL",
-        ) from exc
-    host = (parsed.hostname or "").lower()
-    local_http = parsed.scheme == "http" and host in {"127.0.0.1", "localhost", "::1"}
-    if parsed.scheme != "https" and not local_http:
-        raise FeedbackConfigError(
-            "feedback_endpoint must use HTTPS (localhost HTTP is allowed)",
+        return validate_endpoint_url(
+            value,
+            policy=normalize_policy(policy, name="feedback_endpoint_policy"),
+            private_suffixes=normalize_private_suffixes(
+                private_suffixes, name="feedback_private_host_suffixes"
+            ),
         )
-    if parsed.username or parsed.password or parsed.fragment or parsed.query:
-        raise FeedbackConfigError(
-            "feedback_endpoint must not contain credentials, a query, or a fragment",
-        )
-    if not host:
-        raise FeedbackConfigError(
-            "feedback_endpoint must include a host",
-        )
-    if parsed.scheme == "https" and port not in (None, 443):
-        raise FeedbackConfigError(
-            "feedback_endpoint must use the standard HTTPS port",
-        )
-    if (
-        local_http  # lint
-        and port is not None  # lint
-        and not 1 <= port <= 65535  # ruff: ignore[magic-value-comparison]
-    ):
-        raise FeedbackConfigError("feedback_endpoint contains an invalid local port")
-    return endpoint.rstrip("/")
+    except NetworkPolicyError as exc:
+        raise FeedbackConfigError(str(exc)) from exc
 
 
 def resolve_endpoint(config: Any) -> str:
@@ -132,7 +145,11 @@ def resolve_endpoint(config: Any) -> str:
     profiles. Sites that use different chat/share and feedback services must not
     inherit one authority from the other implicitly.
     """
-    return validate_endpoint(getattr(config, "feedback_endpoint", ""))
+    return validate_endpoint(
+        getattr(config, "feedback_endpoint", ""),
+        policy=getattr(config, "feedback_endpoint_policy", "strict"),
+        private_suffixes=getattr(config, "feedback_private_host_suffixes", ()),
+    )
 
 
 def validate_patterns(

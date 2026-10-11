@@ -669,3 +669,16 @@ the source that the stale tests had stopped reaching.
   `_sphinx_feedback` 0.7.0 (SQLite connections are now closed).
 - Deployment: the live Space keeps its old default until redeployed, or until
   the Space sets `FEEDBACK_ALLOWED_SITE_IDS=scikit-plots-learn,scikit-plots`.
+
+## 2026-10-11 — page feedback mirror follows `_sphinx_feedback` 0.8.0
+
+- `_utils/sync_page_feedback_runtime.py` now copies `_network.py` (shared
+  endpoint/origin policy) and the new service modules `_git.py`,
+  `_webhook.py` and `_custom.py`; `EXPECTED_VENDORED` lists them. The proxy's
+  own defaults are unchanged: GitHub review in the AI Learn repository.
+- The vendored service logs to `sphinx_feedback.service` (no comment text,
+  credit, addresses or secrets).
+- One `-n 8` run of `_hf_spaces_proxy + _integration + _architecture` failed
+  `test_root_logging_isolation::test_the_held_handlers_are_installed_while_this_package_runs`;
+  four further runs (serial and parallel) passed. Recorded as an open
+  observation: the test depends on which xdist worker imported the proxy.

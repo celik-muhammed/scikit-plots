@@ -12,6 +12,19 @@ ranking and optional Corpus retrieval.
 The base behavior never depends on a third-party package. Optional
 accelerators are discovered lazily.
 
+.. toctree::
+   :maxdepth: 2
+   :hidden:
+
+   getting_started
+   how_it_works
+   backends_and_fallbacks
+   ranking_and_matching
+   corpus_integration
+   python_api
+   performance_and_limits
+   troubleshooting
+
 .. grid:: 1 1 2 2
    :gutter: 2
 
@@ -50,19 +63,6 @@ accelerators are discovered lazily.
       :link-type: ref
 
       Complexity, streaming choices and what cutoff does today.
-
-.. toctree::
-   :maxdepth: 2
-   :hidden:
-
-   getting_started
-   how_it_works
-   backends_and_fallbacks
-   ranking_and_matching
-   corpus_integration
-   python_api
-   performance_and_limits
-   troubleshooting
 
 Scope
 -----

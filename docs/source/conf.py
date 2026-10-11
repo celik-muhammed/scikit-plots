@@ -1106,9 +1106,10 @@ html_theme_options = {
     # -- Navigation Settings --------------------------------------------------
     "sidebar_includehidden": True,
     "collapse_navigation": False,
-    "navigation_depth": 2,
-    "show_toc_level": 1,
-    "show_nav_level": 1,
+    # "navigation_depth": 2,  # as the sidebar limit
+    "navigation_depth": 3,  # Allow up to four levels in the left sidebar
+    "show_nav_level": 1,  # as the initially shown levels left-hand, in-page TOC, to set how many levels are expanded initially.
+    "show_toc_level": 1,  # as the initially shown levels right-hand, in-page TOC, to set how many levels are expanded initially.
     # If "prev-next" is included in article_footer_items, then setting show_prev_next
     # to True would repeat prev and next links. See
     # https://github.com/pydata/pydata-sphinx-theme/blob/b731dc230bc26a3d1d1bb039c56c977a9b3d25d8/src/pydata_sphinx_theme/theme/pydata_sphinx_theme/layout.html#L118-L129
@@ -1243,13 +1244,15 @@ html_static_path = [
 # Workaround for removing the left sidebar on pages without TOC
 # A better solution would be to follow the merge of:
 # https://github.com/pydata/pydata-sphinx-theme/pull/1682
+# For the primary (left) sidebar, use html_sidebars in conf.py;
 html_sidebars = {
     # "<page_pattern>": ["list", "of", "templates"],
+    "affiliated/index": [],
+    "auto_examples/00-jupyter_notebooks/index": [],
     "introduction/index": [
         "search-field",
         "sidebar-nav-bs",
     ],
-    "auto_examples/00-jupyter_notebooks/index": [],
     # "learn/glossary/index": [],
     "project/index": [  # This ensures we test for custom sidebars
         "sidebar-nav-bs",

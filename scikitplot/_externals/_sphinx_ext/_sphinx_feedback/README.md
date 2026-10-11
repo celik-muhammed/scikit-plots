@@ -243,7 +243,8 @@ FEEDBACK_GITHUB_TOKEN
 Hugging Face, GitLab, and Bitbucket are understood by the forward-compatible target
 schema, but service configuration rejects them in this release because their write
 adapters are not yet implemented and adversarially tested. The service never pretends
-that an unsupported provider is safe or available.
+that an unsupported provider is safe or available. Until then, reach them through the
+`webhook` or `custom` provider (see "Storage providers").
 
 Provider topology is deliberately simple: exactly one primary is authoritative; zero
 or more mirrors are durability-only. Mirrors fan out concurrently and are bounded by
@@ -257,8 +258,10 @@ environment shorthand keeps review links private by default; deployments that in
 want public provider links can opt in with an explicit storage-target registry.
 
 For cross-origin static sites, configure an exact `FEEDBACK_ALLOWED_ORIGINS` allowlist.
-Only HTTPS origins (plus localhost HTTP for development) are accepted; credentialed
-CORS is not enabled. Blank means no CORS headers.
+`FEEDBACK_ORIGIN_POLICY` (same values as `feedback_endpoint_policy`, default `strict`)
+decides which origins may be listed: `strict` accepts HTTPS on port 443 and loopback
+HTTP(S); `private-network` adds intranet HTTP and HTTPS on any port. Credentialed CORS is
+not enabled. Blank means no CORS headers; a same-origin endpoint needs none.
 
 The standalone ASGI adapter uses the direct peer address for abuse control by default.
 Behind a reverse proxy, opt in to forwarded-address processing only by declaring the
@@ -276,6 +279,147 @@ trust (for example two complementary `/1` networks) is rejected. Only declare pr
 you control and configure them to overwrite or safely append forwarding metadata; trusting a
 proxy that simply relays attacker-supplied `X-Forwarded-For` defeats any downstream parser.
 This setting does not make the process-local limiter global across workers.
+
+## Endpoints and network policy
+
+`feedback_endpoint` takes three forms, checked at build time by `feedback_endpoint_policy`
+(the service applies the same rule to `FEEDBACK_ALLOWED_ORIGINS` through
+`FEEDBACK_ORIGIN_POLICY`):
+
+| Form | Example | `strict` (default) | `private-network` | `any` |
+| --- | --- | --- | --- | --- |
+| same-origin path | `/v1/feedback` | yes | yes | yes |
+| HTTPS, port 443 | `https://feedback.example.org/v1/feedback` | yes | yes | yes |
+| loopback HTTP(S), any port | `http://localhost:8000/v1/feedback` | yes | yes | yes |
+| HTTPS, other port | `https://feedback.corp:8443/v1/feedback` | no | yes | yes |
+| HTTP, private host | `http://feedback.internal:8080/v1/feedback` | no | yes | yes |
+| HTTP, public host | `http://feedback.example.org/v1/feedback` | no | no | yes |
+
+A private host is decided lexically, with no DNS lookup: RFC 1918, CGNAT (`100.64/10`),
+link-local and unique-local IP literals; single-label names (`feedback`); names under
+`.internal`, `.local`, `.localhost`, `.home.arpa`; and names under the suffixes listed in
+`feedback_private_host_suffixes` (service: `FEEDBACK_PRIVATE_HOST_SUFFIXES`), for example
+`[".corp.example"]`. Credentials, queries and fragments are refused under every policy.
+
+Pick by deployment:
+
+- **Public site, hosted service**: `strict`, HTTPS endpoint, origin in the allowlist.
+- **Docs and service behind one server** (reverse proxy, intranet portal, offline
+  laptop): `strict` with the same-origin path `/v1/feedback`; no CORS at all.
+- **Intranet, internal CA or plain HTTP**: `private-network`.
+- **Anything else**: `any`, knowing comments then cross networks unencrypted.
+
+Browsers block an `http://` endpoint on an `https://` page (mixed content) whatever the
+policy says.
+
+## Storage providers
+
+Exactly one primary is authoritative; up to four mirrors are durability-only. Configure
+with `FEEDBACK_STORAGE_TARGETS` (a JSON list) or a one-target shorthand.
+
+| Provider | Where events go | Network | Shorthand (`FEEDBACK_REVIEW_MODE` + env) |
+| --- | --- | --- | --- |
+| `sqlite` | one SQLite file | none | `sqlite` + `FEEDBACK_SQLITE_PATH` |
+| `git` | one commit per event in a local working tree | none | `local` + `FEEDBACK_GIT_REPOSITORY_PATH` (+ `FEEDBACK_GIT_PATH`) |
+| `github` | branch + reviewed pull request on github.com or GitHub Enterprise | HTTPS | `provider-pr` + `FEEDBACK_GITHUB_REPOSITORY` (+ `FEEDBACK_GITHUB_API_URL`) |
+| `webhook` | HMAC-signed POST to any receiver | HTTP(S) | `custom` + `FEEDBACK_WEBHOOK_URL` (+ `FEEDBACK_WEBHOOK_ALLOW_HTTP`) |
+| `custom` | your own Python adapter (`factory: "pkg.mod:make"`) | yours | `custom` + `FEEDBACK_STORAGE_TARGETS` |
+| `gitlab`, `bitbucket`, `huggingface` | modelled, refused until implemented | | use `webhook` or `custom` |
+
+Review modes bind provider families: `sqlite` (all SQLite), `local` (all SQLite or git:
+the service makes no network request), `provider-pr` (primary opens a reviewed
+pull/merge request), `custom` (any implemented provider). Each target accepts only its own
+keys, so a key meant for another provider fails at start instead of being ignored:
+
+```json
+[
+  {"id": "review", "provider": "github", "role": "primary", "repo": "org/docs-feedback",
+   "api_url": "https://ghe.example/api/v3", "paths": {"feedback": "feedback"}},
+  {"id": "archive", "provider": "webhook", "role": "mirror",
+   "url": "https://feedback-ingest.example.workers.dev/v1/events"},
+  {"id": "warehouse", "provider": "custom", "role": "mirror",
+   "factory": "acme_feedback.store:make", "options": {"table": "page_feedback"},
+   "token_env": "FEEDBACK_WAREHOUSE_TOKEN"}
+]
+```
+
+Defaults: `github.api_url` `https://api.github.com`; `github` token aliases
+`FEEDBACK_GITHUB_TOKEN`, `GITHUB_TOKEN`, `AI_RECORD_STORAGE_TOKEN_GITHUB_MIRROR`; `webhook`
+secret `FEEDBACK_WEBHOOK_TOKEN`; `paths.feedback` `feedback`. GitHub Enterprise review URLs
+must be on the API's host. `git` needs an absolute `repository_path` that is the top of a
+working tree; commits use the identity `sphinx-feedback <sphinx-feedback@localhost>` and
+leave pushing to you. `custom` options are short non-secret scalars; secrets come from
+`token_env`. The adapter contract is in `_service/_custom.py`.
+
+## Webhook delivery and Cloudflare
+
+The `webhook` provider POSTs `page.feedback-delivery.v1`, canonical JSON
+`{"contract", "event", "feedback_id", "request_hash"}`, with
+`X-Feedback-Signature-256: sha256=<HMAC-SHA256(secret, body)>` and
+`X-Feedback-Delivery: <feedback_id>`. The receiver answers 2xx
+`{"status": "accepted"|"replay", "feedback_id", "request_hash"}`, or 409 for a feedback ID
+stored with different content. It must be idempotent: the browser retries with the same
+feedback ID. Redirects are not followed. Python receivers can use `_service._webhook.verify`.
+
+Cloudflare, by role:
+
+- **Receiver/storage**: `_service/receivers/cloudflare_worker.js` is a reference Worker
+  that verifies the signature and stores each event once in D1 (primary key on
+  `feedback_id`; KV is eventually consistent and is not used for authority). Deployment
+  steps are in its header. Browsers never call it; only the service does.
+- **In front of the service** (proxy or Cloudflare Tunnel for an intranet service): set
+  `FEEDBACK_TRUSTED_PROXY_CIDRS` to the networks that actually connect to the service, so
+  rate limiting sees the client address and not the edge's.
+- **Static hosting** (Pages): any of the endpoint forms above; a Pages site with a
+  separate service needs its origin in `FEEDBACK_ALLOWED_ORIGINS`.
+
+The Scikit-Plots chat Worker has no `/v1/feedback` route on purpose: a chat/share edge
+must not become feedback authority.
+
+## Logging
+
+Service records go to the `sphinx_feedback.service` logger. Every record carries a
+structured `record.feedback` dict for JSON formatters, with an `event` field:
+
+| `event` | Level | Fields |
+| --- | --- | --- |
+| `service_ready` | INFO | `mode`, `targets` (id, provider, role) |
+| `stored` | INFO | `site_id`, `page_id`, `feedback_id`, `status`, `provider`, `degraded_mirrors` |
+| `rejected` | WARNING | `site_id`, `page_id`, `feedback_id`, `code` |
+| `conflict` | WARNING | `site_id`, `page_id`, `feedback_id` |
+| `unavailable` | ERROR | `site_id`, `page_id`, `feedback_id`, `code` |
+
+The provider exception behind `unavailable` is logged only at DEBUG. Never logged, at any
+level: comment text, contributor credit, client addresses, request headers, credentials.
+`feedback_id` is the per-event nonce, not a person.
+
+```python
+import logging
+
+logging.getLogger("sphinx_feedback.service").setLevel(logging.INFO)
+```
+
+```bash
+uvicorn scikitplot._externals._sphinx_ext._sphinx_feedback._service.app:app --log-config logging.yaml
+```
+
+The Sphinx adapter prints one line per build with `sphinx-build -v`: site ID, endpoint,
+counter source, snapshot selector and whether the snapshot is complete.
+
+## Generators (CLI)
+
+```bash
+python -m scikitplot._externals._sphinx_ext._sphinx_feedback init \
+    --site-id my-docs --endpoint /v1/feedback --mode sqlite
+python -m scikitplot._externals._sphinx_ext._sphinx_feedback aggregate \
+    --site-id my-docs --events review-repo/feedback --sqlite feedback.sqlite3 \
+    --out docs/source/_feedback/aggregate.json [--complete] [--revision REV]
+```
+
+`init` prints a `conf.py` block and the service environment, validated with the same
+rules as the build and the service. `aggregate` reads the provider event layout
+(`pages/<digest>/feedback-<nonce>.json`) and SQLite stores, keeps one site, skips other
+sites' events, and writes a snapshot that is complete only with `--complete`.
 
 ## Idempotency and broken-pipe recovery
 

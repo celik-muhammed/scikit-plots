@@ -59,7 +59,7 @@ so never put a token or secret here; service credentials live only in the
 service's environment.
 
 **Developer note.** This module is documentation that happens to be valid
-Python. ``tests/test_sphinx_build.py`` builds a site from its ``feedback_*``
+Python. ``tests/test_feedback_site_builds.py`` builds a site from its ``feedback_*``
 values, so an example that drifts from what the extension accepts fails the
 test suite.
 
@@ -101,12 +101,29 @@ feedback_page_revision = ""
 # 3. Feedback service
 # ---------------------------------------------------------------------------
 # str, default "". Required while feedback_page_enabled is True (the build
-# stops without it). The explicit /v1/feedback URL. HTTPS on the standard port,
-# or http://localhost / 127.0.0.1 / [::1] for development. No credentials,
-# query or fragment. It is never inherited from AI-assistant endpoint
-# profiles, so a chat-only service cannot become feedback authority by
-# accident.
+# stops without it). Three forms:
+#   "/v1/feedback"                              same origin as the docs: no
+#                                               CORS; intranet, offline, one
+#                                               server behind a reverse proxy
+#   "https://feedback.example.org/v1/feedback"  hosted service
+#   "http://feedback.internal:8080/v1/feedback" intranet (needs the
+#                                               "private-network" policy)
+# No credentials, query or fragment. Never inherited from AI-assistant endpoint
+# profiles, so a chat-only service cannot become feedback authority by accident.
 feedback_endpoint = "https://feedback.example.org/v1/feedback"
+
+# "strict" | "private-network" | "any"; default "strict".
+#   strict           HTTPS on 443, loopback HTTP(S), same-origin path
+#   private-network  + HTTPS on any port, HTTP to private hosts: RFC 1918 /
+#                    CGNAT / link-local / unique-local IPs, single-label names,
+#                    *.internal, *.local, *.localhost, *.home.arpa
+#   any              + HTTP to any host (comments travel unencrypted)
+# A browser blocks http:// from an https:// page whatever this says.
+feedback_endpoint_policy = "strict"
+
+# list[str], default []. Extra private name suffixes for "private-network",
+# for example [".corp.example"]. Matching is lexical; no DNS lookup is made.
+feedback_private_host_suffixes = []
 
 # ---------------------------------------------------------------------------
 # 4. Placement (theme-tolerant)
@@ -218,16 +235,45 @@ feedback_aggregate_file = ""
 # ---------------------------------------------------------------------------
 # 9. Your own service (environment of the service, never conf.py)
 # ---------------------------------------------------------------------------
+# Generate both halves for your site, validated:
+#
+#   python -m scikitplot._externals._sphinx_ext._sphinx_feedback init \
+#       --site-id my-docs --endpoint /v1/feedback --mode sqlite
+#
 # Standalone ASGI adapter shipped with the extension:
 #
 #   uvicorn scikitplot._externals._sphinx_ext._sphinx_feedback._service.app:app
 #
-#   FEEDBACK_REVIEW_MODE=sqlite
-#   FEEDBACK_SQLITE_PATH=/srv/feedback/feedback.sqlite3
+# Where events go (pick one FEEDBACK_REVIEW_MODE):
+#
+#   sqlite       FEEDBACK_SQLITE_PATH=/srv/feedback/feedback.sqlite3
+#   local        FEEDBACK_GIT_REPOSITORY_PATH=/srv/feedback/repo   (a commit per
+#                event; no network at all)
+#   provider-pr  FEEDBACK_GITHUB_REPOSITORY=org/repo  (+ FEEDBACK_GITHUB_API_URL
+#                for GitHub Enterprise; token FEEDBACK_GITHUB_TOKEN)
+#   custom       FEEDBACK_WEBHOOK_URL=https://ingest.example/v1/events  (+ signing
+#                secret FEEDBACK_WEBHOOK_TOKEN): Cloudflare Worker + D1 (reference
+#                receiver in _service/receivers/), GitLab/Bitbucket pipelines,
+#                intranet systems; or FEEDBACK_STORAGE_TARGETS with a "custom"
+#                Python adapter
+#
+# Common settings:
+#
 #   FEEDBACK_ALLOWED_SITE_IDS=my-docs,my-other-docs     # blank = any site_id
-#   FEEDBACK_ALLOWED_ORIGINS=https://docs.example.org,https://user.github.io
+#   FEEDBACK_ALLOWED_ORIGINS=https://docs.example.org   # not needed same-origin
+#   FEEDBACK_ORIGIN_POLICY=strict                       # or private-network / any
+#   FEEDBACK_PRIVATE_HOST_SUFFIXES=.corp.example
 #   FEEDBACK_PAGE_AUTHORITY_FILE=/srv/feedback/page-authority.json  # optional
 #   FEEDBACK_TRUSTED_PROXY_CIDRS=10.0.0.0/8             # only behind your proxy
+#
+# Logs: logger "sphinx_feedback.service"; comments, credit, addresses and
+# secrets are never logged (README, "Logging").
+#
+# Counters: after reviewed events are merged, rebuild this site's snapshot:
+#
+#   python -m scikitplot._externals._sphinx_ext._sphinx_feedback aggregate \
+#       --site-id my-docs --events review-repo/feedback \
+#       --out docs/source/_feedback/aggregate.json --complete
 #
 # On the Scikit-Plots Hugging Face proxy the same FEEDBACK_ALLOWED_SITE_IDS
 # variable overrides its default, and ALLOWED_ORIGINS adds browser origins.

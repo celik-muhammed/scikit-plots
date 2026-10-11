@@ -18,6 +18,8 @@
 
 .. currentmodule:: scikitplot.cython
 
+.. youtube:: rxy_9I8967Q
+
 .. _cython-index:
 
 Cython User Guide
@@ -206,5 +208,3 @@ generation of low-level Cython packages and modules for immediate use and testin
       :maxdepth: 2
 
       _templates/templates_index.rst
-
-.. youtube:: rxy_9I8967Q
